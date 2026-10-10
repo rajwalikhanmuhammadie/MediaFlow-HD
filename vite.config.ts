@@ -75,6 +75,10 @@ export default defineConfig(() => {
             },
           ],
         },
+        workbox: {
+          importScripts: ['/offline-sw-helper.js'],
+          navigateFallbackDenylist: [/^\/api\//],
+        },
         devOptions: {
           enabled: true,
           type: 'module',

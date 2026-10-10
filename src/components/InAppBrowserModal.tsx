@@ -52,6 +52,8 @@ interface InAppBrowserModalProps {
   } | null;
   onTriggerDownload: (url: string) => void;
   onOpenDownloadsManager?: () => void;
+  backHandlerRef?: React.MutableRefObject<(() => boolean) | null>;
+  onBackDepthChange?: (depth: number) => void;
 }
 
 // Preset interactive demonstration reels/videos so users can test playing any social platform right inside the browser
@@ -226,6 +228,8 @@ export const InAppBrowserModal: React.FC<InAppBrowserModalProps> = ({
   initialContext = null,
   onTriggerDownload,
   onOpenDownloadsManager,
+  backHandlerRef,
+  onBackDepthChange,
 }) => {
   const t = translations[lang];
 
@@ -358,6 +362,40 @@ export const InAppBrowserModal: React.FC<InAppBrowserModalProps> = ({
       updateMediaForUrl(prev);
     }
   };
+
+  // Expose internal back navigation for mobile hardware/gesture back button
+  const internalBackDepth = isOpen
+    ? (showLoginHelper ? 1 : 0) + (browserMode === 'webview' ? 1 : 0) + historyIndex
+    : 0;
+
+  useEffect(() => {
+    onBackDepthChange?.(internalBackDepth);
+  }, [internalBackDepth, onBackDepthChange]);
+
+  useEffect(() => {
+    if (!backHandlerRef) return;
+    backHandlerRef.current = () => {
+      if (!isOpen) return false;
+      if (showLoginHelper) {
+        setShowLoginHelper(false);
+        return true;
+      }
+      if (browserMode === 'webview') {
+        setBrowserMode('interactive');
+        return true;
+      }
+      if (historyIndex > 0) {
+        handleGoBack();
+        return true;
+      }
+      return false;
+    };
+    return () => {
+      if (backHandlerRef) {
+        backHandlerRef.current = null;
+      }
+    };
+  });
 
   const handleGoForward = () => {
     if (historyIndex < historyStack.length - 1) {

@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronUp,
   X,
+  ArrowLeft,
   Image as ImageIcon,
   Check,
   Settings2,
@@ -76,7 +77,7 @@ export const MediaResultCard: React.FC<MediaResultCardProps> = ({
   onDownloadNewVideo,
   onOpenCreatorProfile,
 }) => {
-  const [showAllFormats, setShowAllFormats] = useState<boolean>(false);
+  const [showAllFormats, setShowAllFormats] = useState<boolean>(true);
   const [rememberChoice, setRememberChoice] = useState<boolean>(() => {
     return getRememberChoiceState().enabled;
   });
@@ -248,12 +249,14 @@ export const MediaResultCard: React.FC<MediaResultCardProps> = ({
     return opt.quality && opt.quality !== res ? `${opt.quality} (${res})` : res || opt.label;
   };
 
-  // Pre-select option based on "Remember my choice" localStorage state
+  // Pre-select option based on "Remember my choice" localStorage state or highest available server resolution
   useEffect(() => {
     const savedState = getRememberChoiceState();
     setRememberChoice(savedState.enabled);
 
-    if (savedState.enabled && savedState.pref && allOptions.length > 0) {
+    if (allOptions.length === 0) return;
+
+    if (savedState.enabled && savedState.pref) {
       const { pref } = savedState;
       // 1. Exact option ID match
       let matched = allOptions.find((o) => o.id === pref.optionId);
@@ -273,29 +276,32 @@ export const MediaResultCard: React.FC<MediaResultCardProps> = ({
             (o.quality || '').toLowerCase() === pref.quality.toLowerCase()
         );
       }
-      // 4. Match by type fallback (e.g., 720p or 1080p for video, first audio for audio)
+      // 4. Match by type fallback
       if (!matched) {
         matched =
-          allOptions.find((o) => o.type === pref.type && /720p|1080p/i.test(o.resolution || '')) ||
+          allOptions.find((o) => o.type === pref.type && /1080p|720p/i.test(o.resolution || '')) ||
           allOptions.find((o) => o.type === pref.type) ||
           allOptions[0];
       }
 
       if (matched) {
         setSelectedOptionId(matched.id);
-        const inPrimaryVideo = primaryVideoOptions.some((v) => v.id === matched!.id);
-        const inPrimaryAudio = audioOptions.slice(0, 2).some((a) => a.id === matched!.id);
-        if (!inPrimaryVideo && !inPrimaryAudio) {
-          setShowAllFormats(true);
-        }
         return;
       }
     }
 
-    if (!savedState.enabled) {
-      setSelectedOptionId(null);
-    }
-  }, [media.originalUrl, allOptions, primaryVideoOptions, audioOptions]);
+    // Keep user's current selection if it still exists in the newly extracted options; otherwise pre-select best video resolution
+    setSelectedOptionId((prevId) => {
+      if (prevId && allOptions.some((o) => o.id === prevId)) {
+        return prevId;
+      }
+      const bestDefault =
+        videoOptions.find((v) => /1080p|720p/i.test(v.resolution || '')) ||
+        videoOptions[0] ||
+        allOptions[0];
+      return bestDefault ? bestDefault.id : null;
+    });
+  }, [media.originalUrl, allOptions, videoOptions]);
 
   const selectedOption = useMemo(() => {
     if (!selectedOptionId) return null;
@@ -349,15 +355,14 @@ export const MediaResultCard: React.FC<MediaResultCardProps> = ({
   };
 
   // Main Yellow #FFCC00 Download Button Execution:
-  // Immediately sends task to active download queue, closes bottom sheet, and clears input/home screen
+  // Immediately sends selected server resolution to active download queue
   const handleConfirmDownload = () => {
     const targetOption =
       selectedOption ||
-      (rememberChoice
-        ? videoOptions.find((v) => /720p|1080p/i.test(v.resolution || '')) ||
-          videoOptions[0] ||
-          allOptions[0]
-        : null);
+      videoOptions.find((v) => /1080p|720p/i.test(v.resolution || '')) ||
+      videoOptions[0] ||
+      allOptions[0] ||
+      null;
 
     if (!targetOption) return;
 
@@ -371,13 +376,8 @@ export const MediaResultCard: React.FC<MediaResultCardProps> = ({
       });
     }
 
-    // 1. Send task to active download queue on the Downloads Page
+    // Send task to active download queue on the Downloads Page
     onStartDownload(targetOption);
-
-    // 2. Close the bottom sheet and clear input/home screen so user can immediately paste new links
-    if (onDownloadNewVideo) {
-      onDownloadNewVideo();
-    }
   };
 
   // Lock background page scroll while Link Parsing / Download Modal is open
@@ -393,7 +393,6 @@ export const MediaResultCard: React.FC<MediaResultCardProps> = ({
     <div
       className="fixed inset-x-0 top-[57px] bottom-[65px] z-[80] !m-0 bg-[#10131c] flex flex-col justify-start p-0 overflow-hidden"
       id="link-extraction-bottom-sheet-backdrop"
-      onClick={handleCloseSheet}
     >
       <motion.div
         id="link-extraction-bottom-sheet"
@@ -479,8 +478,19 @@ export const MediaResultCard: React.FC<MediaResultCardProps> = ({
               </div>
             </div>
 
-            {/* Relocated, High-Visibility Action Bar for Mobile & Desktop (Creator Profile & Close Sheet) */}
+            {/* Relocated, High-Visibility Action Bar for Mobile & Desktop (Back Button + Creator Profile) */}
             <div className="grid grid-cols-2 gap-2 pt-1">
+              <button
+                type="button"
+                id="close-parse-bottom-sheet-btn"
+                onClick={handleCloseSheet}
+                className="w-full px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer transition-all active:scale-98 shadow-xs"
+                aria-label="Back to previous page"
+              >
+                <ArrowLeft className="w-3.5 h-3.5 text-[#FFCC00] shrink-0" />
+                <span>{lang === 'ur' ? 'واپس جائیں (Back)' : 'Back'}</span>
+              </button>
+
               <button
                 type="button"
                 id="open-creator-profile-sheet-btn"
@@ -502,17 +512,6 @@ export const MediaResultCard: React.FC<MediaResultCardProps> = ({
                 <span className="truncate">
                   {lang === 'ur' ? `کریئیٹر ویڈیوز: ${creatorHandle}` : `Creator: ${creatorHandle}`}
                 </span>
-              </button>
-
-              <button
-                type="button"
-                id="close-parse-bottom-sheet-btn"
-                onClick={handleCloseSheet}
-                className="w-full px-3 py-1.5 rounded-xl bg-rose-600/25 hover:bg-rose-600/40 border border-rose-500/50 text-rose-100 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-xs"
-                aria-label="Close dialog"
-              >
-                <X className="w-3.5 h-3.5 text-rose-300 shrink-0" />
-                <span>{lang === 'ur' ? 'بند کریں (Close)' : 'Close'}</span>
               </button>
             </div>
           </div>

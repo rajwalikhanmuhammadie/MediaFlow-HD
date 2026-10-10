@@ -204,3 +204,127 @@ export async function registerServiceWorkerWithCaching(
     onStatusUpdate?.(fallbackStats);
   }
 }
+
+export const OFFLINE_MEDIA_CACHE_NAME = 'mediaflow-offline-media-v1';
+export const OFFLINE_CREATOR_API_CACHE_NAME = 'mediaflow-offline-creator-api-v1';
+
+/**
+ * Caches thumbnail, avatar, and media URLs in both CacheStorage and the active Service Worker
+ * so downloaded history items and saved account profiles work when no internet connection is detected.
+ */
+export async function cacheMediaUrlsInServiceWorker(
+  urls: Array<string | undefined | null>
+): Promise<void> {
+  if (typeof window === 'undefined') return;
+  const cleanUrls = Array.from(
+    new Set(
+      urls
+        .map((u) => (typeof u === 'string' ? u.trim() : ''))
+        .filter((u) => u && (u.startsWith('http://') || u.startsWith('https://') || u.startsWith('/')))
+    )
+  ).slice(0, 40);
+
+  if (cleanUrls.length === 0) return;
+
+  // 1. Notify active Service Worker if controlling the page
+  try {
+    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({
+        type: 'CACHE_MEDIA_URLS',
+        urls: cleanUrls,
+      });
+    }
+  } catch {
+    // ignore postMessage errors
+  }
+
+  // 2. Also populate CacheStorage directly from client so offline access works immediately even before SW claim
+  if ('caches' in window) {
+    try {
+      const cache = await window.caches.open(OFFLINE_MEDIA_CACHE_NAME);
+      await Promise.allSettled(
+        cleanUrls.map(async (rawUrl) => {
+          const isCrossOriginSocial =
+            rawUrl.startsWith('http') &&
+            !rawUrl.startsWith(window.location.origin) &&
+            /tiktokcdn|cdninstagram|fbcdn\.net|pinimg\.com/i.test(rawUrl);
+          const fetchUrl = isCrossOriginSocial
+            ? `/api/image-proxy?url=${encodeURIComponent(rawUrl)}`
+            : rawUrl;
+          const existing = await cache.match(fetchUrl);
+          if (!existing) {
+            const res = await fetch(fetchUrl, { mode: 'cors', credentials: 'same-origin' }).catch(() => null);
+            if (res && res.ok) {
+              await cache.put(fetchUrl, res.clone());
+              if (fetchUrl !== rawUrl) {
+                await cache.put(rawUrl, res.clone());
+              }
+            }
+          }
+        })
+      );
+    } catch {
+      // ignore offline storage quota errors
+    }
+  }
+}
+
+export async function cacheHistoryItemInServiceWorker(item: {
+  thumbnail?: string;
+  mediaUrl?: string;
+  authorAvatar?: string;
+}): Promise<void> {
+  if (!item) return;
+  const urlsToCache: string[] = [];
+  if (item.thumbnail) {
+    urlsToCache.push(item.thumbnail);
+    if (item.thumbnail.startsWith('http')) {
+      urlsToCache.push(`/api/image-proxy?url=${encodeURIComponent(item.thumbnail)}`);
+    }
+  }
+  if (item.authorAvatar) {
+    urlsToCache.push(item.authorAvatar);
+  }
+  // If mediaUrl is a same-origin stream/download endpoint or small preview, pre-cache thumbnail & metadata
+  await cacheMediaUrlsInServiceWorker(urlsToCache);
+}
+
+export async function cacheSavedAccountInServiceWorker(account: {
+  avatar?: string;
+  sampleVideoUrl?: string;
+  profileUrl?: string;
+  handle?: string;
+  platform?: string;
+}): Promise<void> {
+  if (!account) return;
+  const urlsToCache: string[] = [];
+  if (account.avatar) {
+    urlsToCache.push(account.avatar);
+    if (account.avatar.startsWith('http')) {
+      urlsToCache.push(`/api/image-proxy?url=${encodeURIComponent(account.avatar)}`);
+    }
+  }
+  if (account.sampleVideoUrl && account.sampleVideoUrl.startsWith('http')) {
+    urlsToCache.push(account.sampleVideoUrl);
+  }
+  await cacheMediaUrlsInServiceWorker(urlsToCache);
+}
+
+export async function syncOfflineHistoryAndAccountsToSW(
+  historyItems: Array<{ thumbnail?: string; mediaUrl?: string }> = [],
+  savedAccounts: Array<{ avatar?: string; sampleVideoUrl?: string; profileUrl?: string }> = []
+): Promise<void> {
+  const urls: Array<string | undefined> = [];
+  historyItems.slice(0, 30).forEach((h) => {
+    if (h?.thumbnail) {
+      urls.push(h.thumbnail);
+    }
+  });
+  savedAccounts.slice(0, 20).forEach((acc) => {
+    if (acc?.avatar) {
+      urls.push(acc.avatar);
+    }
+  });
+  await cacheMediaUrlsInServiceWorker(urls);
+}
+

@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { 
   X, 
+  ArrowLeft,
   Play, 
   Pause, 
   Volume2, 
@@ -166,6 +167,23 @@ export const ExpandablePreviewModal: React.FC<ExpandablePreviewModalProps> = ({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, activeTab, isPlaying, zoomLevel, rotation]);
+
+  // Support mobile hardware back button when preview modal is open
+  useEffect(() => {
+    if (!isOpen) return;
+    try {
+      window.history.pushState({ mediaflowExpandablePreview: true }, '');
+    } catch {}
+
+    const handlePopState = () => {
+      onClose();
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [isOpen]);
 
   if (!isOpen || !media) return null;
 
@@ -370,11 +388,22 @@ export const ExpandablePreviewModal: React.FC<ExpandablePreviewModalProps> = ({
         className="relative w-full max-w-5xl bg-slate-950 rounded-2xl sm:rounded-3xl overflow-hidden shadow-2xl border border-slate-800 flex flex-col max-h-[92vh]"
         id="expandable-preview-modal"
       >
-        {/* Top Header Bar */}
-        <div className="flex items-center justify-between px-3 sm:px-5 py-3 sm:py-3.5 bg-slate-900/90 border-b border-slate-800 z-20 shrink-0">
+        {/* Top Header Bar with Prominent Mobile Back Button */}
+        <div className="flex items-center justify-between px-3 sm:px-5 py-3 sm:py-3.5 bg-slate-900/95 border-b border-slate-800 z-20 shrink-0 gap-2">
           
-          {/* Left: Platform & Title */}
-          <div className="flex items-center gap-2.5 min-w-0 pr-2">
+          {/* Left: Back Button + Platform & Title */}
+          <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 pr-2 flex-1">
+            <button
+              type="button"
+              onClick={onClose}
+              id="expandable-preview-back-btn"
+              className="px-3 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 active:scale-95 text-white text-xs sm:text-sm font-extrabold flex items-center gap-1.5 border border-white/20 shadow-md cursor-pointer shrink-0 transition-all"
+              title={lang === 'ur' ? 'واپس جائیں' : 'Back'}
+            >
+              <ArrowLeft className="w-4 h-4 text-[#FFCC00]" />
+              <span>{lang === 'ur' ? 'واپس' : 'Back'}</span>
+            </button>
+
             <span className="text-[10px] sm:text-xs font-black px-2.5 py-0.5 rounded-full bg-blue-600 text-white shadow-xs uppercase tracking-wider shrink-0">
               {media.platform}
             </span>

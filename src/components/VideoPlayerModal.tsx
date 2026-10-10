@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { 
   X, 
+  ArrowLeft,
   Play, 
   Pause, 
   Volume2, 
@@ -67,6 +68,22 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       }
     }
   }, [isOpen, media, activeSourceIndex]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    try {
+      window.history.pushState({ mediaflowVideoPlayerModal: true }, '');
+    } catch {}
+
+    const handlePopState = () => {
+      onClose();
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [isOpen]);
 
   if (!isOpen || !media) return null;
   const t = translations[lang];
@@ -162,9 +179,19 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         ref={playerContainerRef}
         className="relative w-full max-w-4xl bg-slate-950 rounded-2xl sm:rounded-3xl overflow-hidden shadow-2xl border border-slate-800 flex flex-col"
       >
-        {/* Top bar */}
-        <div className="flex items-center justify-between p-3 sm:p-4 bg-gradient-to-b from-black/80 to-transparent absolute top-0 inset-x-0 z-20">
-          <div className="flex items-center gap-2 min-w-0 pr-2">
+        {/* Top bar with Prominent Mobile Back Button */}
+        <div className="flex items-center justify-between p-3 sm:p-4 bg-gradient-to-b from-black/90 via-black/70 to-transparent absolute top-0 inset-x-0 z-20 gap-2">
+          <div className="flex items-center gap-2 min-w-0 pr-2 flex-1">
+            <button
+              type="button"
+              onClick={onClose}
+              id="video-player-back-btn"
+              className="px-3 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 active:scale-95 text-white text-xs sm:text-sm font-extrabold flex items-center gap-1.5 border border-white/20 shadow-md cursor-pointer shrink-0 transition-all"
+              title={lang === 'ur' ? 'واپس جائیں' : 'Back'}
+            >
+              <ArrowLeft className="w-4 h-4 text-[#FFCC00]" />
+              <span>{lang === 'ur' ? 'واپس' : 'Back'}</span>
+            </button>
             <span className="text-[10px] sm:text-xs font-bold px-2 sm:px-2.5 py-0.5 rounded-full bg-blue-600 text-white shadow-xs shrink-0">
               {media.platform.toUpperCase()}
             </span>

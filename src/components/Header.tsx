@@ -11,6 +11,7 @@ import {
   HardDrive,
   Layers,
   X,
+  ArrowLeft,
   ChevronRight,
   ChevronDown,
   ChevronUp,
@@ -120,6 +121,8 @@ interface HeaderProps {
   onToggleSettingsOpen?: (open: boolean) => void;
   isMoreOpen?: boolean;
   onToggleMoreOpen?: (open: boolean) => void;
+  canAppGoBack?: boolean;
+  onAppBack?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -174,6 +177,8 @@ export const Header: React.FC<HeaderProps> = ({
   onToggleSettingsOpen,
   isMoreOpen,
   onToggleMoreOpen,
+  canAppGoBack = false,
+  onAppBack,
 }) => {
   const isLight = theme === 'light';
   const onSelectTab = onChangeSection || onSelectTabProp;
@@ -350,34 +355,53 @@ export const Header: React.FC<HeaderProps> = ({
         }`}
       >
         <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-3">
-          {/* Zone 1: Brand Title + Subtle Tagline */}
-          <button
-            type="button"
-            onClick={() => {
-              setSettingsDrawerOpen(false);
-              setMoreDrawerOpen(false);
-              if (onSelectTab) onSelectTab('downloader');
-              setTimeout(() => {
-                const inputEl = document.getElementById('video-url-input');
-                if (inputEl) inputEl.focus();
-              }, 80);
-            }}
-            className="flex items-center gap-2 min-w-0 text-left cursor-pointer group"
-          >
-            <MediaFlowLogo
-              size={34}
-              showText={true}
-              isLight={isLight}
-              className="group-hover:opacity-95 transition-opacity shrink-0"
-            />
-            <span
-              className={`text-[10px] sm:text-xs font-medium tracking-tight truncate ${
-                isLight ? 'text-slate-500' : 'text-slate-400'
-              }`}
+          {/* Zone 1: Mobile/App Back Button (when active) + Brand Title */}
+          <div className="flex items-center gap-2 min-w-0">
+            {canAppGoBack && onAppBack && (
+              <button
+                type="button"
+                id="header-app-back-btn"
+                onClick={onAppBack}
+                className={`w-9 h-9 rounded-xl border flex items-center justify-center shrink-0 cursor-pointer transition-colors ${
+                  isLight
+                    ? 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-200'
+                    : 'bg-slate-800/90 hover:bg-slate-700 text-slate-100 border-slate-700'
+                }`}
+                title={lang === 'ur' ? 'واپس جائیں (Back)' : 'Back'}
+                aria-label={lang === 'ur' ? 'واپس جائیں' : 'Back'}
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => {
+                setSettingsDrawerOpen(false);
+                setMoreDrawerOpen(false);
+                if (onSelectTab) onSelectTab('downloader');
+                setTimeout(() => {
+                  const inputEl = document.getElementById('video-url-input');
+                  if (inputEl) inputEl.focus();
+                }, 80);
+              }}
+              className="flex items-center gap-2 min-w-0 text-left cursor-pointer group"
             >
-              Free HD Video Downloader
-            </span>
-          </button>
+              <MediaFlowLogo
+                size={34}
+                showText={true}
+                isLight={isLight}
+                className="group-hover:opacity-95 transition-opacity shrink-0"
+              />
+              <span
+                className={`text-[10px] sm:text-xs font-medium tracking-tight truncate ${
+                  isLight ? 'text-slate-500' : 'text-slate-400'
+                }`}
+              >
+                Free HD Video Downloader
+              </span>
+            </button>
+          </div>
 
           {/* Zone 3: Active Queue Quick Status (Only shown when tasks exist, otherwise quiet) */}
           <div className="flex items-center gap-2 shrink-0">

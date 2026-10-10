@@ -1,5 +1,151 @@
 import { PlatformType, HistoryItem, RecentSearchItem, DownloadOption, MediaResult, AutoClearDuration, Language, DownloadTask, SavedAccountItem, FileSizeUnit } from '../types';
 import confetti from 'canvas-confetti';
+import {
+  cacheHistoryItemInServiceWorker,
+  cacheSavedAccountInServiceWorker,
+} from './serviceWorkerCache';
+
+export const FACEBOOK_COOKIES_STORAGE_KEY = 'mediaflow_facebook_cookies_v1';
+export const SOCIAL_COOKIES_STORAGE_KEY = 'mediaflow_social_cookies_v1';
+
+export function getSavedFacebookCookies(): string {
+  try {
+    if (typeof window === 'undefined') return '';
+    const stored = localStorage.getItem(FACEBOOK_COOKIES_STORAGE_KEY);
+    if (stored && stored.trim()) return stored.trim();
+    const envCookies = (import.meta as any).env?.VITE_FACEBOOK_COOKIES;
+    if (envCookies && typeof envCookies === 'string' && envCookies.trim()) {
+      return envCookies.trim();
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return '';
+}
+
+export function saveFacebookCookies(cookies: string): void {
+  try {
+    if (typeof window === 'undefined') return;
+    const trimmed = (cookies || '').trim();
+    if (trimmed) {
+      localStorage.setItem(FACEBOOK_COOKIES_STORAGE_KEY, trimmed);
+    } else {
+      localStorage.removeItem(FACEBOOK_COOKIES_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function buildBrowserSessionPayloadAndHeaders(targetUrl: string): {
+  headers: Record<string, string>;
+  sessionPayload: {
+    platform: PlatformType;
+    simulateBrowserSession: boolean;
+    forceRefresh: boolean;
+    cacheBust: string;
+    userAgent: string;
+    acceptLanguage: string;
+    cookies?: string;
+    facebookCookies?: string;
+    browserHeaders: Record<string, string>;
+  };
+} {
+  const clean = (targetUrl || '').trim();
+  const platform = detectPlatform(clean);
+  const isFacebook = platform === 'facebook' || /facebook\.com|fb\.watch|fb\.me|fb\.gg|fbcdn\.net/i.test(clean);
+  const isTikTok = platform === 'tiktok' || /tiktok\.com|douyin\.com/i.test(clean);
+  const isInstagram = platform === 'instagram' || /instagram\.com|instagr\.am/i.test(clean);
+
+  const browserUa =
+    typeof navigator !== 'undefined' && navigator.userAgent && !/headless/i.test(navigator.userAgent)
+      ? navigator.userAgent
+      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+  const acceptLang =
+    typeof navigator !== 'undefined' && navigator.language
+      ? `${navigator.language},en-US;q=0.9,en;q=0.8`
+      : 'en-US,en;q=0.9';
+
+  const savedFbCookies = getSavedFacebookCookies();
+  // Default browser session cookies for Facebook (locale, viewport dimensions, pixel ratio) + any user-configured cookies
+  const defaultFbSessionCookies = 'locale=en_US; wd=1920x1080; dpr=1';
+  const effectiveFbCookies = isFacebook
+    ? savedFbCookies
+      ? `${defaultFbSessionCookies}; ${savedFbCookies}`
+      : defaultFbSessionCookies
+    : undefined;
+
+  const referer = isFacebook
+    ? 'https://www.facebook.com/'
+    : isTikTok
+    ? 'https://www.tiktok.com/'
+    : isInstagram
+    ? 'https://www.instagram.com/'
+    : 'https://www.google.com/';
+
+  const origin = isFacebook
+    ? 'https://www.facebook.com'
+    : isTikTok
+    ? 'https://www.tiktok.com'
+    : isInstagram
+    ? 'https://www.instagram.com'
+    : undefined;
+
+  const secChUa = '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"';
+  const secChUaPlatform = '"Windows"';
+
+  const browserHeaders: Record<string, string> = {
+    'User-Agent': browserUa,
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': acceptLang,
+    'Sec-CH-UA': secChUa,
+    'Sec-CH-UA-Mobile': '?0',
+    'Sec-CH-UA-Platform': secChUaPlatform,
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1',
+    Referer: referer,
+    ...(origin ? { Origin: origin } : {}),
+    ...(effectiveFbCookies ? { Cookie: effectiveFbCookies } : {}),
+  };
+
+  const cacheBust = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  const requestHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Pragma: 'no-cache',
+    'X-Cache-Bust': cacheBust,
+    'X-Browser-User-Agent': browserUa,
+    'X-Accept-Language': acceptLang,
+    'X-Client-Platform': platform,
+    'X-Simulate-Browser-Session': 'true',
+    'X-Sec-Ch-Ua': secChUa,
+    'X-Sec-Ch-Ua-Mobile': '?0',
+    'X-Sec-Ch-Ua-Platform': secChUaPlatform,
+    'X-Platform-Referer': referer,
+    ...(effectiveFbCookies ? { 'X-Facebook-Cookies': effectiveFbCookies } : {}),
+  };
+
+  return {
+    headers: requestHeaders,
+    sessionPayload: {
+      platform,
+      simulateBrowserSession: true,
+      forceRefresh: isTikTok,
+      cacheBust,
+      userAgent: browserUa,
+      acceptLanguage: acceptLang,
+      cookies: effectiveFbCookies,
+      facebookCookies: effectiveFbCookies,
+      browserHeaders,
+    },
+  };
+}
+
 
 export function detectPlatform(url: string): PlatformType {
   const clean = url.trim().toLowerCase();
@@ -404,8 +550,13 @@ export async function triggerBrowserDownload(
   }, 280);
 
   try {
+    const { headers: sessionHeaders } = buildBrowserSessionPayloadAndHeaders(
+      targetUrl || blobUrlOrHttp
+    );
+    const { 'Content-Type': _omitCt, ...getDownloadHeaders } = sessionHeaders;
     const response = await fetch(downloadEndpoint, {
       method: 'GET',
+      headers: getDownloadHeaders,
       signal: options?.signal,
     });
     headersReceived = true;
@@ -696,6 +847,11 @@ export function saveHistoryItem(item: HistoryItem): HistoryItem[] {
     } catch {
       // memoryHistoryCache holds the items for the active session
     }
+  }
+  try {
+    cacheHistoryItemInServiceWorker(item);
+  } catch {
+    // ignore SW cache errors
   }
   return [...updated];
 }
@@ -1670,30 +1826,6 @@ export function ensureCompleteMediaResolutionOptions(
     return 500;
   };
 
-  if (mediaData.isVideo !== false) {
-    const cleanSourceUrl = mediaData.originalUrl;
-    const existingTiers = new Set<number>(videoOptions.map((o) => parseTierRank(o)));
-    for (const spec of STANDARD_VIDEO_RESOLUTION_LADDER) {
-      if (!existingTiers.has(spec.tier)) {
-        existingTiers.add(spec.tier);
-        videoOptions.push({
-          id: spec.id,
-          label: spec.label,
-          resolution: spec.resolution,
-          format: 'MP4',
-          size: spec.size,
-          quality: spec.quality,
-          url: `/api/download?url=${encodeURIComponent(cleanSourceUrl)}&format=mp4&height=${spec.tier}`,
-          type: 'video',
-          badge: spec.badge,
-          noWatermark: removeWatermark,
-          width: spec.width,
-          height: spec.height,
-        });
-      }
-    }
-  }
-
   videoOptions.sort((a, b) => parseTierRank(b) - parseTierRank(a));
 
   const taggedVideoOptions = videoOptions.map((opt, index) => {
@@ -2296,6 +2428,11 @@ export function saveOrUpdateAccount(
     memorySavedAccountsCache = next;
     if (typeof window !== 'undefined') {
       localStorage.setItem(SAVED_ACCOUNTS_STORAGE_KEY, JSON.stringify(next));
+    }
+    try {
+      cacheSavedAccountInServiceWorker(updatedItem);
+    } catch {
+      // ignore SW cache errors
     }
     return [...next];
   } catch {

@@ -102,6 +102,8 @@ interface HistoryGalleryProps {
   onResumeTask?: (id: string) => void;
   onCancelTask?: (id: string) => void;
   onRetryTask?: (id: string) => void;
+  backHandlerRef?: React.MutableRefObject<(() => boolean) | null>;
+  onBackDepthChange?: (depth: number) => void;
 }
 
 export const HistoryGallery: React.FC<HistoryGalleryProps> = ({
@@ -125,6 +127,8 @@ export const HistoryGallery: React.FC<HistoryGalleryProps> = ({
   onResumeTask,
   onCancelTask,
   onRetryTask,
+  backHandlerRef,
+  onBackDepthChange,
 }) => {
   const [activeTab, setActiveTab] = useState<'downloads' | 'hidden' | 'recent_searches'>('downloads');
   const [search, setSearch] = useState('');
@@ -184,6 +188,54 @@ export const HistoryGallery: React.FC<HistoryGalleryProps> = ({
       setPlayerDuration(0);
     }
   }, [playingItem]);
+
+  // Expose internal back navigation for mobile hardware/gesture back button
+  const internalBackDepth = isOpen
+    ? (renameTargetItem ? 1 : 0) +
+      (contextMenuItem ? 1 : 0) +
+      (isSortDropdownOpen ? 1 : 0) +
+      (playingItem ? 1 : 0) +
+      (activeTab !== 'downloads' || search.trim() !== '' || filterType !== 'all' ? 1 : 0)
+    : 0;
+
+  useEffect(() => {
+    onBackDepthChange?.(internalBackDepth);
+  }, [internalBackDepth, onBackDepthChange]);
+
+  useEffect(() => {
+    if (!backHandlerRef) return;
+    backHandlerRef.current = () => {
+      if (!isOpen) return false;
+      if (renameTargetItem) {
+        setRenameTargetItem(null);
+        return true;
+      }
+      if (contextMenuItem) {
+        setContextMenuItem(null);
+        return true;
+      }
+      if (isSortDropdownOpen) {
+        setIsSortDropdownOpen(false);
+        return true;
+      }
+      if (playingItem) {
+        setPlayingItem(null);
+        return true;
+      }
+      if (activeTab !== 'downloads' || search.trim() !== '' || filterType !== 'all') {
+        setActiveTab('downloads');
+        setSearch('');
+        setFilterType('all');
+        return true;
+      }
+      return false;
+    };
+    return () => {
+      if (backHandlerRef) {
+        backHandlerRef.current = null;
+      }
+    };
+  });
 
   if (!isOpen) return null;
   const t = translations[lang];
@@ -1528,20 +1580,33 @@ export const HistoryGallery: React.FC<HistoryGalleryProps> = ({
           className="fixed inset-0 z-[90] bg-black/95 backdrop-blur-xl flex flex-col justify-between animate-fade-in"
           id="history-instant-player-overlay"
         >
-          {/* Top Bar */}
-          <div className="px-4 py-3 bg-gradient-to-b from-black/90 to-transparent flex items-center justify-between gap-3 z-10">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 text-xs text-slate-300 font-mono tabular-nums">
-                <span className="text-[#FFCC00] font-bold uppercase">{playingItem.platform}</span>
-                <span>·</span>
-                <span>{getCleanResolutionBadge(playingItem)}</span>
+          {/* Top Bar with Prominent Mobile Back Button */}
+          <div className="px-3 sm:px-4 py-3 bg-gradient-to-b from-black/95 via-black/80 to-transparent flex items-center justify-between gap-2.5 z-20">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <button
+                type="button"
+                id="history-player-back-btn"
+                onClick={() => setPlayingItem(null)}
+                className="px-3 sm:px-3.5 py-2 rounded-xl bg-white/15 hover:bg-white/25 active:scale-95 text-white text-xs sm:text-sm font-extrabold flex items-center gap-1.5 border border-white/20 shadow-lg cursor-pointer shrink-0 transition-all"
+                title={lang === 'ur' ? 'واپس جائیں' : 'Back'}
+              >
+                <ArrowLeft className="w-4 h-4 text-[#FFCC00]" />
+                <span>{lang === 'ur' ? 'واپس' : 'Back'}</span>
+              </button>
+
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5 text-[11px] sm:text-xs text-slate-300 font-mono tabular-nums">
+                  <span className="text-[#FFCC00] font-bold uppercase">{playingItem.platform}</span>
+                  <span>·</span>
+                  <span>{getCleanResolutionBadge(playingItem)}</span>
+                </div>
+                <h4 className="text-xs sm:text-sm font-bold text-white truncate mt-0.5">
+                  {playingItem.title}
+                </h4>
               </div>
-              <h4 className="text-xs sm:text-sm font-bold text-white truncate mt-0.5">
-                {playingItem.title}
-              </h4>
             </div>
 
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
               {onGoToPage && (
                 <button
                   type="button"
@@ -1550,7 +1615,7 @@ export const HistoryGallery: React.FC<HistoryGalleryProps> = ({
                     setPlayingItem(null);
                     onGoToPage(itemToOpen);
                   }}
-                  className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  className="px-2.5 sm:px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
                   <span className="hidden sm:inline">Go to Page</span>
@@ -1559,7 +1624,7 @@ export const HistoryGallery: React.FC<HistoryGalleryProps> = ({
               <button
                 type="button"
                 onClick={() => onReDownload(playingItem)}
-                className="px-3 py-1.5 rounded-xl bg-[#FFCC00] hover:bg-[#f2c200] text-slate-950 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
+                className="px-3 py-2 rounded-xl bg-[#FFCC00] hover:bg-[#f2c200] text-slate-950 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>{lang === 'ur' ? 'محفوظ کریں' : 'Save'}</span>
@@ -1706,19 +1771,30 @@ export const HistoryGallery: React.FC<HistoryGalleryProps> = ({
                   </div>
                 </div>
 
-                {/* Fullscreen Toggle */}
-                <button
-                  type="button"
-                  onClick={handlePlayerFullscreenToggle}
-                  className="w-10 h-10 rounded-xl bg-white/10 hover:bg-white/20 text-white flex items-center justify-center cursor-pointer"
-                  title="Fullscreen"
-                >
-                  {isPlayerFullscreen ? (
-                    <Minimize2 className="w-4 h-4" />
-                  ) : (
-                    <Maximize2 className="w-4 h-4" />
-                  )}
-                </button>
+                {/* Right Controls: Back to Gallery + Fullscreen Toggle */}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPlayingItem(null)}
+                    className="h-10 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center gap-1.5 border border-white/15 cursor-pointer"
+                    title={lang === 'ur' ? 'واپس جائیں' : 'Back'}
+                  >
+                    <ArrowLeft className="w-4 h-4 text-[#FFCC00]" />
+                    <span>{lang === 'ur' ? 'واپس' : 'Back'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handlePlayerFullscreenToggle}
+                    className="w-10 h-10 rounded-xl bg-white/10 hover:bg-white/20 text-white flex items-center justify-center cursor-pointer"
+                    title="Fullscreen"
+                  >
+                    {isPlayerFullscreen ? (
+                      <Minimize2 className="w-4 h-4" />
+                    ) : (
+                      <Maximize2 className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
               </div>
             </div>
           )}

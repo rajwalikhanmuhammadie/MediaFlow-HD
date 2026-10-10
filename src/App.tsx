@@ -79,8 +79,12 @@ import {
   parseSizeToMb,
   getSavedFileSizeUnit,
   setSavedFileSizeUnit,
-  formatDisplayFileSize
+  formatDisplayFileSize,
+  cleanSocialUrl,
+  detectPlatform,
+  buildBrowserSessionPayloadAndHeaders
 } from './utils/urlParser';
+import { syncOfflineHistoryAndAccountsToSW } from './utils/serviceWorkerCache';
 import { 
   initAuth, 
   uploadMediaToDrive 
@@ -681,14 +685,17 @@ export default function App() {
     setIsClipboardInlineVideoPlaying(false);
     setIsClipboardPreviewLoading(true);
 
-    // 2. Enrich with real backend metadata in the background
+    // 2. Enrich with real backend metadata in the background (with browser session, Facebook cookie emulation & TikTok cache-busting)
     try {
-      const response = await fetch('/api/analyze-link', {
+      const { headers, sessionPayload } = buildBrowserSessionPayloadAndHeaders(clean);
+      const response = await fetch(`/api/analyze-link?_cb=${encodeURIComponent(sessionPayload.cacheBust)}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        headers,
         body: JSON.stringify({
           url: clean,
           removeWatermark,
+          ...sessionPayload,
         }),
       });
       if (clipboardPreviewReqIdRef.current !== reqId) return;
@@ -819,6 +826,11 @@ export default function App() {
     setHistory(saved);
     const savedSearches = getSavedRecentSearches();
     setRecentSearches(savedSearches);
+    try {
+      syncOfflineHistoryAndAccountsToSW(saved, getSavedAccounts());
+    } catch {
+      // ignore SW sync errors
+    }
 
     if (typeof window !== 'undefined') {
       try {
@@ -1328,14 +1340,23 @@ export default function App() {
     if (vOpts.length > 0) {
       // Prefer non-watermarked streams when available, otherwise consider all video options
       const candidatePool = vOpts.filter((o) => !o.id?.endsWith('-wm'));
-      const pool = candidatePool.length > 0 ? candidatePool : vOpts;
+      const basePool = candidatePool.length > 0 ? candidatePool : vOpts;
+
+      // Prefer options that have an authentic extracted stream (directUrl or formatId) over synthetic ladder placeholders
+      const verifiedStreamPool = basePool.filter(
+        (o) => Boolean(o.formatId) || (typeof o.url === 'string' && o.url.includes('directUrl='))
+      );
+      const pool =
+        verifiedStreamPool.length > 0 && targetMedia.platform !== 'youtube'
+          ? verifiedStreamPool
+          : basePool;
 
       // Priority-ordered regex patterns from highest (8K/4320p, 4K/2160p, 2K/1440p) down to 1080p and lower
       const resolutionPriorityPatterns: RegExp[] = [
-        /\b(?:4320p?|8k)\b|4320|8k/i,
+        /\b(?:1080p?|fhd|full\s*hd)\b|1080|fhd|full\s*hd/i,
         /\b(?:2160p?|4k|uhd)\b|2160|4k/i,
         /\b(?:1440p?|2k|qhd)\b|1440|2k|qhd/i,
-        /\b(?:1080p?|fhd|full\s*hd)\b|1080|fhd|full\s*hd/i,
+        /\b(?:4320p?|8k)\b|4320|8k/i,
         /\b(?:720p?|hd)\b|720/i,
         /\b(?:480p?|sd)\b|480/i,
         /\b360p?\b|360/i,
@@ -1363,28 +1384,40 @@ export default function App() {
     return iOpts[0] || options[0];
   };
 
-  // Analyze URL with real backend yt-dlp extractor & progressive loading states
+  // Analyze URL with real backend multi-platform extractor & all server resolutions (no demo fallback)
   const handleAnalyzeUrl = async (
     customUrl?: string,
     autoStartHd: boolean = false,
-    isManual: boolean = false
+    _isManual: boolean = false
   ) => {
-    const targetUrl = (customUrl || url).trim();
+    const rawTarget = (customUrl || url).trim();
+    const extractedUrls = extractUrlsFromText(rawTarget);
+    const targetUrl = (extractedUrls.length > 0 ? extractedUrls[0] : rawTarget).trim();
     if (!targetUrl) {
       setErrorMessage(t.invalidUrlError);
       return;
     }
-    if (isManual) {
-      unmarkUrlAsCleared(targetUrl);
-    } else if (clearedUrlsRef.current.has(targetUrl)) {
-      return;
+
+    // Always allow explicit or clicked link analysis to proceed
+    unmarkUrlAsCleared(targetUrl);
+    if (targetUrl !== url) {
+      setUrl(targetUrl);
     }
 
     pendingAutoHdDownloadRef.current = autoStartHd;
+
+    // Only reuse existing media if it is for the EXACT same normalized non-TikTok URL and was genuinely extracted from the server
+    const detectedTargetPlatform = detectPlatform(targetUrl);
+    const isSameAlreadyExtractedMedia =
+      detectedTargetPlatform !== 'tiktok' &&
+      media &&
+      !isLoading &&
+      cleanSocialUrl(media.originalUrl) === cleanSocialUrl(targetUrl) &&
+      media.watermarkMethod !== `${media.platform.toUpperCase()} Direct Extraction Pipeline`;
+
     lastAutoAnalyzedUrlRef.current = targetUrl;
 
-    // If this exact URL is already analyzed and loaded, start HD download immediately if requested
-    if (media && (media.originalUrl === targetUrl || lastAutoAnalyzedUrlRef.current === targetUrl) && !isLoading) {
+    if (isSameAlreadyExtractedMedia && media) {
       if (pendingAutoHdDownloadRef.current) {
         pendingAutoHdDownloadRef.current = false;
         const hdOpt = pickBestHdOption(media);
@@ -1393,6 +1426,7 @@ export default function App() {
           return;
         }
       }
+      return;
     }
 
     const currentReqId = ++analyzeRequestIdRef.current;
@@ -1417,27 +1451,52 @@ export default function App() {
 
     setErrorMessage(null);
     setIsLoading(true);
-    setLoadingMessage(lang === 'ur' ? 'یو آر ایل کا تجزیہ جاری ہے...' : 'Analyzing URL...');
-
-    // Immediately open the full Link Parsing Bottom Sheet Modal with instant client-side resolution/audio options
-    const instantMedia = generateClientSideMediaResult(targetUrl, removeWatermark);
-    setMedia(instantMedia);
+    setLoadingMessage(
+      lang === 'ur'
+        ? 'سرور سے ویڈیو اور تمام ریزولوشنز نکالی جا رہی ہیں...'
+        : 'Extracting video & all server resolutions...'
+    );
 
     const timer = setTimeout(() => {
       if (analyzeRequestIdRef.current === currentReqId) {
-        setLoadingMessage(lang === 'ur' ? 'ویڈیو نکالی جا رہی ہے...' : 'Extracting video...');
+        setLoadingMessage(
+          lang === 'ur'
+            ? 'سرور پر موجود تمام ایچ ڈی ریزولوشنز کے لنکس حاصل کیے جا رہے ہیں...'
+            : 'Fetching all available resolution links from server...'
+        );
       }
-    }, 600);
+    }, 700);
 
     try {
-      const response = await fetch('/api/analyze-link', {
+      const { headers, sessionPayload } = buildBrowserSessionPayloadAndHeaders(targetUrl);
+      const analyzeEndpoint = `/api/analyze-link?_cb=${encodeURIComponent(sessionPayload.cacheBust)}`;
+      let response = await fetch(analyzeEndpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        cache: 'no-store',
+        headers,
+        body: JSON.stringify({
           url: targetUrl,
           removeWatermark,
+          ...sessionPayload,
         }),
       });
+
+      // If first attempt returned non-OK, retry once with fresh browser session headers & cache-bust token
+      if (!response.ok) {
+        await new Promise((r) => setTimeout(r, 350));
+        const retrySession = buildBrowserSessionPayloadAndHeaders(targetUrl);
+        response = await fetch(`/api/analyze-link?_cb=${encodeURIComponent(retrySession.sessionPayload.cacheBust)}`, {
+          method: 'POST',
+          cache: 'no-store',
+          headers: retrySession.headers,
+          body: JSON.stringify({
+            url: targetUrl,
+            removeWatermark,
+            ...retrySession.sessionPayload,
+            retryAttempt: 1,
+          }),
+        });
+      }
 
       if (analyzeRequestIdRef.current !== currentReqId) {
         return;
@@ -1477,14 +1536,23 @@ export default function App() {
             // ignore storage errors
           }
         } else {
-          resolvedMedia = generateClientSideMediaResult(targetUrl, removeWatermark);
-          setMedia(resolvedMedia);
-          setErrorMessage(null);
+          setMedia(null);
+          setErrorMessage(
+            result.error ||
+              (lang === 'ur'
+                ? 'ویڈیو حاصل کرنے میں ناکامی، براہ کرم لنک دوبارہ چیک کریں۔'
+                : 'Could not extract video from this link. Please check the URL and try again.')
+          );
         }
       } else {
-        resolvedMedia = generateClientSideMediaResult(targetUrl, removeWatermark);
-        setMedia(resolvedMedia);
-        setErrorMessage(null);
+        const errJson = await response.json().catch(() => null);
+        setMedia(null);
+        setErrorMessage(
+          errJson?.error ||
+            (lang === 'ur'
+              ? 'ویڈیو حاصل کرنے میں ناکامی، براہ کرم لنک دوبارہ چیک کریں۔'
+              : 'Could not extract video from this link. Please check the URL and try again.')
+        );
       }
 
       if (
@@ -1502,16 +1570,12 @@ export default function App() {
       if (analyzeRequestIdRef.current !== currentReqId) {
         return;
       }
-      const fallbackResult = generateClientSideMediaResult(targetUrl, removeWatermark);
-      setMedia(fallbackResult);
-      setErrorMessage(null);
-      if (pendingAutoHdDownloadRef.current) {
-        pendingAutoHdDownloadRef.current = false;
-        const hdOpt = pickBestHdOption(fallbackResult);
-        if (hdOpt) {
-          handleStartDownload(hdOpt, fallbackResult);
-        }
-      }
+      setMedia(null);
+      setErrorMessage(
+        lang === 'ur'
+          ? 'سرور سے رابطہ کرنے میں مسئلہ پیش آیا، دوبارہ کوشش کریں۔'
+          : 'Network error while extracting video resolutions. Please try again.'
+      );
     } finally {
       clearTimeout(timer);
       if (analyzeRequestIdRef.current === currentReqId) {
@@ -1533,11 +1597,12 @@ export default function App() {
       unmarkUrlAsCleared(targetUrl);
     }
 
-    // If the link has already been processed, start HD download immediately!
+    // If the exact link has already been genuinely extracted by the backend, start HD download immediately!
     if (
       media &&
       !isLoading &&
-      (media.originalUrl === targetUrl || lastAutoAnalyzedUrlRef.current === targetUrl)
+      cleanSocialUrl(media.originalUrl) === cleanSocialUrl(targetUrl) &&
+      media.watermarkMethod !== `${media.platform.toUpperCase()} Direct Extraction Pipeline`
     ) {
       const hdOpt = pickBestHdOption(media);
       if (hdOpt) {
@@ -1546,8 +1611,8 @@ export default function App() {
       }
     }
 
-    // If the link is currently being processed right now, queue immediate HD download upon completion
-    if (isLoading) {
+    // If the link is currently being processed right now for the same URL, queue immediate HD download upon completion
+    if (isLoading && cleanSocialUrl(lastAutoAnalyzedUrlRef.current) === cleanSocialUrl(targetUrl)) {
       pendingAutoHdDownloadRef.current = true;
       return;
     }
@@ -1642,12 +1707,15 @@ export default function App() {
 
     let parsedMedia: MediaResult | null = null;
     try {
-      const response = await fetch('/api/analyze-link', {
+      const { headers, sessionPayload } = buildBrowserSessionPayloadAndHeaders(cleanUrl);
+      const response = await fetch(`/api/analyze-link?_cb=${encodeURIComponent(sessionPayload.cacheBust)}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        headers,
         body: JSON.stringify({ 
           url: cleanUrl,
           removeWatermark: true,
+          ...sessionPayload,
         }),
       });
 
@@ -1818,6 +1886,7 @@ export default function App() {
         (t) => !(t.sourceUrl === activeMedia.originalUrl && (t.optionId === option.id || t.url === option.url))
       ),
     ]);
+    setIsDownloadsDrawerOpen(true);
   };
 
   // Pause / Resume / Cancel / Retry tasks
@@ -2577,6 +2646,245 @@ export default function App() {
   ).length;
   const totalAttentionCount = activeTaskCount + pausedAndFailedCount;
 
+  // ============================================================================
+  // UNIFIED MOBILE HARDWARE / SYSTEM BACK BUTTON & IN-APP BACK NAVIGATION
+  // ============================================================================
+  const builtInBrowserBackRef = useRef<(() => boolean) | null>(null);
+  const inAppBrowserBackRef = useRef<(() => boolean) | null>(null);
+  const historyGalleryBackRef = useRef<(() => boolean) | null>(null);
+
+  const [builtInBrowserBackDepth, setBuiltInBrowserBackDepth] = useState<number>(0);
+  const [inAppBrowserBackDepth, setInAppBrowserBackDepth] = useState<number>(0);
+  const [historyGalleryBackDepth, setHistoryGalleryBackDepth] = useState<number>(0);
+  const [externalBrowserSearch, setExternalBrowserSearch] = useState<{
+    query: string;
+    tick: number;
+  } | null>(null);
+
+  const pushedHistoryCountRef = useRef<number>(0);
+  const prevAppBackDepthRef = useRef<number>(0);
+  const isHandlingPopStateRef = useRef<boolean>(false);
+
+  // Total active back-steps available in the application
+  const appBackDepth =
+    (isPreviewModalOpen ? 1 : 0) +
+    (isQrModalOpen ? 1 : 0) +
+    (isAICaptionOpen ? 1 : 0) +
+    (isScheduleModalOpen ? 1 : 0) +
+    (isClipboardQuickPreviewOpen ? 1 : 0) +
+    (isBrowserOpen ? 1 + inAppBrowserBackDepth : 0) +
+    (isCreatorProfileModalOpen ? 1 : 0) +
+    (isGeminiChatOpen ? 1 : 0) +
+    (isBatchOpen ? 1 : 0) +
+    (isFreqModalOpen ? 1 : 0) +
+    (isInstallModalOpen ? 1 : 0) +
+    (isDriveModalOpen ? 1 : 0) +
+    (isGuideOpen ? 1 : 0) +
+    (isGalleryOpen ? 1 + historyGalleryBackDepth : 0) +
+    (isDownloadsDrawerOpen ? 1 : 0) +
+    (isSettingsDrawerOpen ? 1 : 0) +
+    (isMoreDrawerOpen ? 1 : 0) +
+    (activeSection !== 'downloader' ? 1 : 0) +
+    (media !== null || errorMessage !== null || isLoading ? 1 : 0) +
+    builtInBrowserBackDepth +
+    (url.trim() !== '' && !media ? 1 : 0);
+
+  const canAppGoBack = appBackDepth > 0;
+
+  // Priority-ordered back handler that unwinds the topmost active modal, drawer, view, or browser step
+  const handleAppBack = (): boolean => {
+    if (isPreviewModalOpen) {
+      setIsPreviewModalOpen(false);
+      return true;
+    }
+    if (isQrModalOpen) {
+      setIsQrModalOpen(false);
+      return true;
+    }
+    if (isAICaptionOpen) {
+      setIsAICaptionOpen(false);
+      return true;
+    }
+    if (isScheduleModalOpen) {
+      setIsScheduleModalOpen(false);
+      setScheduleTargetOption(null);
+      setScheduleTargetTask(null);
+      return true;
+    }
+    if (isClipboardQuickPreviewOpen) {
+      setIsClipboardQuickPreviewOpen(false);
+      setIsClipboardInlineVideoPlaying(false);
+      return true;
+    }
+    if (isBrowserOpen) {
+      if (inAppBrowserBackRef.current && inAppBrowserBackRef.current()) {
+        return true;
+      }
+      setIsBrowserOpen(false);
+      return true;
+    }
+    if (isCreatorProfileModalOpen) {
+      setIsCreatorProfileModalOpen(false);
+      return true;
+    }
+    if (isGeminiChatOpen) {
+      setIsGeminiChatOpen(false);
+      setGeminiChatContext(null);
+      return true;
+    }
+    if (isBatchOpen) {
+      setIsBatchOpen(false);
+      return true;
+    }
+    if (isFreqModalOpen) {
+      setIsFreqModalOpen(false);
+      return true;
+    }
+    if (isInstallModalOpen) {
+      setIsInstallModalOpen(false);
+      return true;
+    }
+    if (isDriveModalOpen) {
+      setIsDriveModalOpen(false);
+      return true;
+    }
+    if (isGuideOpen) {
+      setIsGuideOpen(false);
+      return true;
+    }
+    if (isGalleryOpen) {
+      if (historyGalleryBackRef.current && historyGalleryBackRef.current()) {
+        return true;
+      }
+      setIsGalleryOpen(false);
+      return true;
+    }
+    if (isDownloadsDrawerOpen) {
+      setIsDownloadsDrawerOpen(false);
+      return true;
+    }
+    if (isSettingsDrawerOpen) {
+      setIsSettingsDrawerOpen(false);
+      return true;
+    }
+    if (isMoreDrawerOpen) {
+      setIsMoreDrawerOpen(false);
+      return true;
+    }
+    if (activeSection !== 'downloader') {
+      setActiveSection('downloader');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return true;
+    }
+    if (media !== null || errorMessage !== null || isLoading) {
+      handleDownloadNewVideo();
+      return true;
+    }
+    if (builtInBrowserBackRef.current && builtInBrowserBackRef.current()) {
+      return true;
+    }
+    if (url.trim() !== '') {
+      handleDownloadNewVideo();
+      return true;
+    }
+    if (typeof window !== 'undefined' && window.scrollY > 100) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return true;
+    }
+    return false;
+  };
+
+  const handleAppBackRef = useRef(handleAppBack);
+  handleAppBackRef.current = handleAppBack;
+
+  const appBackDepthRef = useRef(appBackDepth);
+  appBackDepthRef.current = appBackDepth;
+
+  // Push browser history entries as app navigation depth increases so mobile hardware/swipe Back triggers popstate
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const prevDepth = prevAppBackDepthRef.current;
+    prevAppBackDepthRef.current = appBackDepth;
+
+    if (isHandlingPopStateRef.current) {
+      isHandlingPopStateRef.current = false;
+      // Ensure at least 1 history guard entry remains if the app still has active back layers
+      if (appBackDepth > 0 && pushedHistoryCountRef.current === 0) {
+        try {
+          window.history.pushState({ mediaflowAppBack: true, depth: appBackDepth }, '');
+          pushedHistoryCountRef.current = 1;
+        } catch {
+          // ignore history state errors in restricted contexts
+        }
+      }
+      return;
+    }
+
+    if (appBackDepth > prevDepth) {
+      const diff = appBackDepth - prevDepth;
+      const stepsToPush = Math.min(diff, 3);
+      for (let i = 0; i < stepsToPush; i++) {
+        try {
+          window.history.pushState(
+            { mediaflowAppBack: true, depth: pushedHistoryCountRef.current + 1 },
+            ''
+          );
+          pushedHistoryCountRef.current += 1;
+        } catch {
+          // ignore
+        }
+      }
+    } else if (appBackDepth > 0 && pushedHistoryCountRef.current === 0) {
+      try {
+        window.history.pushState({ mediaflowAppBack: true, depth: appBackDepth }, '');
+        pushedHistoryCountRef.current = 1;
+      } catch {
+        // ignore
+      }
+    }
+  }, [appBackDepth]);
+
+  // Intercept mobile hardware Back button & iOS/Android swipe-back gesture via popstate
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    // Arm a base history entry on first user touch/click so mobile Back stays inside the app
+    const armInitialHistoryGuard = () => {
+      if (pushedHistoryCountRef.current === 0) {
+        try {
+          window.history.pushState({ mediaflowAppBack: true, depth: 0 }, '');
+          pushedHistoryCountRef.current = 1;
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    const handlePopState = () => {
+      isHandlingPopStateRef.current = true;
+      pushedHistoryCountRef.current = Math.max(0, pushedHistoryCountRef.current - 1);
+
+      const handled = handleAppBackRef.current();
+      if (handled && appBackDepthRef.current > 1 && pushedHistoryCountRef.current === 0) {
+        try {
+          window.history.pushState({ mediaflowAppBack: true, depth: appBackDepthRef.current - 1 }, '');
+          pushedHistoryCountRef.current = 1;
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    window.addEventListener('touchstart', armInitialHistoryGuard, { once: true, passive: true });
+    window.addEventListener('click', armInitialHistoryGuard, { once: true });
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('touchstart', armInitialHistoryGuard);
+      window.removeEventListener('click', armInitialHistoryGuard);
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
+
   return (
     <div className={`relative min-h-screen flex flex-col font-sans transition-colors duration-300 overflow-x-hidden ${
       theme === 'light'
@@ -2681,6 +2989,10 @@ export default function App() {
           if (found) {
             handleSelectPlatform(found);
           }
+        }}
+        canAppGoBack={canAppGoBack}
+        onAppBack={() => {
+          handleAppBack();
         }}
       />
 
@@ -3132,7 +3444,7 @@ export default function App() {
         )}
 
         {activeSection === 'downloader' && (
-          <div className="space-y-4 sm:space-y-5 animate-fade-in">
+          <div className="flex-1 flex flex-col space-y-4 sm:space-y-5 animate-fade-in">
             {/* 1. Main Download Link Extraction Section (Directly Below Header) */}
             <LinkInputSection
               lang={lang}
@@ -3147,6 +3459,10 @@ export default function App() {
               onClear={handleDownloadNewVideo}
               onAnalyze={(customUrl) => handleAnalyzeUrl(customUrl, false, true)}
               onHdDownload={(customUrl) => handleAnalyzeUrl(customUrl, false, true)}
+              clipboardDetectedUrl={clipboardDetectedUrl}
+              onSearchKeyword={(keyword) => {
+                setExternalBrowserSearch({ query: keyword, tick: Date.now() });
+              }}
               hdReadyOption={
                 media
                   ? (() => {
@@ -3187,10 +3503,15 @@ export default function App() {
               }}
             />
 
-            {/* 2. In-App Browser & Search Engine Section (Middle Content Area) */}
+            {/* 2. In-App Browser & Search Engine Section (Moves to top & expands full-screen on focus/search) */}
             <BuiltInChromeBrowser
               lang={lang}
               theme={theme}
+              backHandlerRef={builtInBrowserBackRef}
+              onBackDepthChange={setBuiltInBrowserBackDepth}
+              clipboardDetectedUrl={clipboardDetectedUrl}
+              recentSearches={recentSearches}
+              externalSearchQuery={externalBrowserSearch}
               onDownloadUrl={(selectedUrl) => {
                 setActiveSection('downloader');
                 setUrl(selectedUrl);
@@ -3202,7 +3523,7 @@ export default function App() {
             <AnimatePresence>
               {media && (
                 <MediaResultCard
-                  key={`media_card_${media.platform || 'universal'}_${media.originalUrl || 'card'}_${media.timestamp || ''}`}
+                  key={`media_card_${media.platform || 'universal'}_${cleanSocialUrl(media.originalUrl || 'card')}`}
                   media={media}
                   lang={lang}
                   fileSizeUnit={fileSizeUnit}
@@ -3234,6 +3555,27 @@ export default function App() {
                 />
               )}
             </AnimatePresence>
+
+            {/* 4. App Download Link Positioned at the Very Bottom of the Page */}
+            <div
+              id="home-app-download-bar"
+              className={`mt-auto pt-4 pb-1 flex items-center justify-center gap-2 text-xs sm:text-sm ${
+                theme === 'light' ? 'text-slate-600' : 'text-slate-300'
+              }`}
+            >
+              <span>
+                {lang === 'ur' ? 'ایپ ڈاؤن لوڈ لنک:' : 'Download App:'}
+              </span>
+              <a
+                href="https://mediaflow-hd.ai.studio"
+                target="_blank"
+                rel="noopener noreferrer"
+                id="home-direct-app-link"
+                className="font-mono font-bold text-emerald-500 hover:text-emerald-400 underline underline-offset-4 transition-colors cursor-pointer"
+              >
+                https://mediaflow-hd.ai.studio
+              </a>
+            </div>
           </div>
         )}
 
@@ -3606,6 +3948,8 @@ export default function App() {
       <HistoryGallery
         isOpen={isGalleryOpen}
         onClose={() => setIsGalleryOpen(false)}
+        backHandlerRef={historyGalleryBackRef}
+        onBackDepthChange={setHistoryGalleryBackDepth}
         history={history}
         tasks={tasks}
         recentSearches={recentSearches}
@@ -3749,6 +4093,8 @@ export default function App() {
       <InAppBrowserModal
         isOpen={isBrowserOpen}
         onClose={() => setIsBrowserOpen(false)}
+        backHandlerRef={inAppBrowserBackRef}
+        onBackDepthChange={setInAppBrowserBackDepth}
         lang={lang}
         initialUrl={browserInitialUrl}
         initialContext={browserInitialContext}

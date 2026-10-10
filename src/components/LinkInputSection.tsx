@@ -56,6 +56,8 @@ interface LinkInputSectionProps {
   onRemoveRecentSearch?: (id: string) => void;
   onClearRecentSearches?: () => void;
   onDeleteOlderThan7Days?: () => void;
+  clipboardDetectedUrl?: string | null;
+  onSearchKeyword?: (keyword: string) => void;
 }
 
 export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
@@ -65,12 +67,13 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
   onChangeUrl,
   onClear,
   onAnalyze,
-  onHdDownload,
   hdReadyOption,
   isLoading,
   recentSearches,
   onRemoveRecentSearch,
   onClearRecentSearches,
+  clipboardDetectedUrl,
+  onSearchKeyword,
 }) => {
   const isLight = theme === 'light';
   const t = translations[lang];
@@ -83,10 +86,21 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
   const inputWrapperRef = useRef<HTMLDivElement>(null);
   const detected = url.trim() ? detectPlatform(url) : null;
 
-  // Compact autocomplete suggestions (up to 4 items) when typing
+  const [liveClipboardUrl, setLiveClipboardUrl] = useState<string | null>(null);
+  const effectiveClipboardUrl = useMemo(() => {
+    const candidate = (liveClipboardUrl || clipboardDetectedUrl || '').trim();
+    if (!candidate || !/^https?:\/\/[^\s]+\.[^\s]+/i.test(candidate)) return null;
+    if (candidate === url.trim()) return null;
+    return candidate;
+  }, [liveClipboardUrl, clipboardDetectedUrl, url]);
+
+  // Show 2 to 3 search history items below the copied link
   const recentFiveUrls = useMemo(() => {
     const rawList = recentSearches !== undefined ? recentSearches : localFallbackSearches;
     const seen = new Set<string>();
+    if (effectiveClipboardUrl) {
+      seen.add(effectiveClipboardUrl.toLowerCase());
+    }
     const deduped: RecentSearchItem[] = [];
 
     const sorted = [...rawList].sort((a, b) => (b.searchedAt || 0) - (a.searchedAt || 0));
@@ -101,7 +115,7 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
 
     const q = url.trim().toLowerCase();
     if (!q) {
-      return deduped.slice(0, 4);
+      return deduped.slice(0, 3);
     }
 
     return deduped
@@ -111,8 +125,8 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
           (item.title ? item.title.toLowerCase().includes(q) : false) ||
           item.platform.toLowerCase().includes(q)
       )
-      .slice(0, 4);
-  }, [recentSearches, localFallbackSearches, url]);
+      .slice(0, 3);
+  }, [recentSearches, localFallbackSearches, url, effectiveClipboardUrl]);
 
   const handleClearIndividualRecentItem = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -157,15 +171,19 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
         const text = await navigator.clipboard.readText();
         if (text) {
           const extracted = extractUrlsFromText(text);
-          const target = extracted.length > 0 ? extracted[0] : text.trim();
+          const target = (extracted.length > 0 ? extracted[0] : text.trim()).trim();
           onChangeUrl(target);
           setIsRecentDropdownOpen(false);
-          setPasteNotice(
-            lang === 'ur'
-              ? 'لنک پیسٹ ہو گیا — ڈاؤن لوڈ بٹن دبائیں'
-              : 'Link pasted — tap Download below'
-          );
-          setTimeout(() => setPasteNotice(null), 2500);
+          if (/^https?:\/\//i.test(target)) {
+            onAnalyze(target);
+          } else {
+            setPasteNotice(
+              lang === 'ur'
+                ? 'لنک پیسٹ ہو گیا — ڈاؤن لوڈ بٹن دبائیں'
+                : 'Link pasted — tap Download below'
+            );
+            setTimeout(() => setPasteNotice(null), 2500);
+          }
         }
       }
     } catch {
@@ -178,15 +196,10 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
     if (pastedText && pastedText.trim().startsWith('http')) {
       e.preventDefault();
       const extracted = extractUrlsFromText(pastedText);
-      const target = extracted.length > 0 ? extracted[0] : pastedText.trim();
+      const target = (extracted.length > 0 ? extracted[0] : pastedText.trim()).trim();
       onChangeUrl(target);
       setIsRecentDropdownOpen(false);
-      setPasteNotice(
-        lang === 'ur'
-          ? 'لنک پیسٹ ہو گیا — ڈاؤن لوڈ بٹن دبائیں'
-          : 'Link pasted — tap Download below'
-      );
-      setTimeout(() => setPasteNotice(null), 2500);
+      onAnalyze(target);
     }
   };
 
@@ -232,9 +245,17 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
         handleSelectRecentUrl(recentFiveUrls[highlightedIdx]);
         return;
       }
-      if (url.trim()) {
+      const trimmed = url.trim();
+      if (trimmed) {
         setIsRecentDropdownOpen(false);
-        onAnalyze(url.trim());
+        const isUrlLike =
+          /^https?:\/\//i.test(trimmed) ||
+          (/^[a-z0-9.-]+\.[a-z]{2,}(\/|$)/i.test(trimmed) && !trimmed.includes(' '));
+        if (!isUrlLike && onSearchKeyword) {
+          onSearchKeyword(trimmed);
+        } else {
+          onAnalyze(trimmed);
+        }
       }
     }
   };
@@ -268,12 +289,29 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
 
   const handleUrlChange = (val: string) => {
     onChangeUrl(val);
-    if (val.trim().length > 0 && recentFiveUrls.length > 0) {
-      setIsRecentDropdownOpen(true);
-    } else {
-      setIsRecentDropdownOpen(false);
-    }
+    setIsRecentDropdownOpen(true);
     setHighlightedIdx(-1);
+  };
+
+  const handleInputFocus = async () => {
+    setIsRecentDropdownOpen(true);
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          const extracted = extractUrlsFromText(text);
+          const candidate = (extracted.length > 0 ? extracted[0] : text.trim()).trim();
+          if (/^https?:\/\/[^\s]+\.[^\s]+/i.test(candidate)) {
+            setLiveClipboardUrl(candidate);
+          }
+        }
+      }
+    } catch {
+      // ignore clipboard read restrictions
+    }
   };
 
   return (
@@ -305,21 +343,17 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
               <div className="shrink-0 flex items-center">{getPlatformIcon(detected)}</div>
 
               <input
-                type="url"
+                type="text"
                 value={url}
-                onFocus={() => {
-                  if (url.trim().length > 0 && recentFiveUrls.length > 0) {
-                    setIsRecentDropdownOpen(true);
-                  }
-                }}
+                onFocus={handleInputFocus}
                 onChange={(e) => handleUrlChange(e.target.value)}
                 onPaste={handleInputPaste}
                 onKeyDown={handleKeyDown}
                 dir={lang === 'ur' ? 'rtl' : 'ltr'}
                 placeholder={
                   lang === 'ur'
-                    ? 'ویڈیو کا لنک یہاں پیسٹ کریں...'
-                    : 'Paste video or media link here...'
+                    ? 'ویڈیو کا لنک پیسٹ کریں یا کچھ بھی سرچ کریں...'
+                    : 'Paste video link or search anything...'
                 }
                 className={`w-full py-2.5 text-sm sm:text-base outline-none bg-transparent font-sans ${
                   isLight
@@ -329,7 +363,7 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
                 id="video-url-input"
                 autoComplete="off"
                 spellCheck="false"
-                aria-expanded={isRecentDropdownOpen && recentFiveUrls.length > 0}
+                aria-expanded={isRecentDropdownOpen && (Boolean(effectiveClipboardUrl) || recentFiveUrls.length > 0)}
                 aria-controls="recent-searched-urls-dropdown"
               />
 
@@ -369,8 +403,8 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
               </div>
             </div>
 
-            {/* Compact Autocomplete Dropdown (only when typing/focused & matching items exist) */}
-            {isRecentDropdownOpen && recentFiveUrls.length > 0 && (
+            {/* Copied Link First + 2-3 Recent Search History Items Dropdown */}
+            {isRecentDropdownOpen && (effectiveClipboardUrl || recentFiveUrls.length > 0) && (
               <div
                 id="recent-searched-urls-dropdown"
                 role="listbox"
@@ -381,27 +415,64 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
                     : 'bg-[#111827] border-slate-800 text-slate-100'
                 }`}
               >
-                <div
-                  className={`px-3 py-1.5 border-b flex items-center justify-between text-[11px] ${
-                    isLight
-                      ? 'bg-slate-50 border-slate-200 text-slate-500'
-                      : 'bg-[#0b0f19] border-slate-800 text-slate-400'
-                  }`}
-                >
-                  <span className="flex items-center gap-1.5 font-medium">
-                    <Clock className="w-3 h-3" />
-                    <span>{lang === 'ur' ? 'حالیہ لنکس' : 'Recent links'}</span>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleBulkClearAllRecent}
-                    id="clear-recent-searched-urls-btn"
-                    className="text-[11px] font-medium text-rose-500 hover:underline flex items-center gap-1 cursor-pointer"
+                {/* 1. Copied Link Shown First */}
+                {effectiveClipboardUrl && (
+                  <div
+                    onClick={() => {
+                      onChangeUrl(effectiveClipboardUrl);
+                      setIsRecentDropdownOpen(false);
+                      onAnalyze(effectiveClipboardUrl);
+                    }}
+                    className={`px-3 py-2.5 border-b flex items-center justify-between gap-2.5 cursor-pointer transition-colors ${
+                      isLight
+                        ? 'bg-sky-50/90 hover:bg-sky-100 border-slate-200'
+                        : 'bg-sky-950/40 hover:bg-sky-900/50 border-slate-800'
+                    }`}
                   >
-                    <Trash2 className="w-3 h-3" />
-                    <span>{lang === 'ur' ? 'صاف کریں' : 'Clear'}</span>
-                  </button>
-                </div>
+                    <div className="min-w-0 flex-1 text-left" dir="ltr">
+                      <div className="flex items-center gap-1.5 text-xs font-bold text-sky-500">
+                        <Clipboard className="w-3.5 h-3.5 shrink-0" />
+                        <span>
+                          {lang === 'ur' ? 'کاپی کیا گیا لنک (Copied Link)' : 'Copied Link'}
+                        </span>
+                      </div>
+                      <div
+                        className={`text-[11px] font-mono truncate mt-0.5 ${
+                          isLight ? 'text-slate-700' : 'text-slate-200'
+                        }`}
+                      >
+                        {effectiveClipboardUrl}
+                      </div>
+                    </div>
+                    <span className="px-2.5 py-1 rounded-lg bg-rose-600 text-white text-[11px] font-bold shrink-0">
+                      {lang === 'ur' ? 'ڈاؤن لوڈ' : 'Download'}
+                    </span>
+                  </div>
+                )}
+
+                {recentFiveUrls.length > 0 && (
+                  <div
+                    className={`px-3 py-1.5 border-b flex items-center justify-between text-[11px] ${
+                      isLight
+                        ? 'bg-slate-50 border-slate-200 text-slate-500'
+                        : 'bg-[#0b0f19] border-slate-800 text-slate-400'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1.5 font-medium">
+                      <Clock className="w-3 h-3" />
+                      <span>{lang === 'ur' ? 'سرچ ہسٹری (2–3)' : 'Search History'}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleBulkClearAllRecent}
+                      id="clear-recent-searched-urls-btn"
+                      className="text-[11px] font-medium text-rose-500 hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      <span>{lang === 'ur' ? 'صاف کریں' : 'Clear'}</span>
+                    </button>
+                  </div>
+                )}
 
                 <div className="divide-y divide-slate-200/40 dark:divide-slate-800 max-h-56 overflow-y-auto">
                   {recentFiveUrls.map((item, idx) => {
@@ -475,7 +546,14 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
               const target = url.trim();
               if (!target) return;
               setIsRecentDropdownOpen(false);
-              onAnalyze(target);
+              const isUrlLike =
+                /^https?:\/\//i.test(target) ||
+                (/^[a-z0-9.-]+\.[a-z]{2,}(\/|$)/i.test(target) && !target.includes(' '));
+              if (!isUrlLike && onSearchKeyword) {
+                onSearchKeyword(target);
+              } else {
+                onAnalyze(target);
+              }
             }}
             className="w-full sm:w-auto px-6 py-3.5 rounded-xl sm:rounded-2xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-sm sm:text-base flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer min-h-[50px] sm:min-h-[54px] shadow-md shadow-rose-600/25 transition-all active:scale-[0.99]"
             id="fetch-download-btn"
@@ -516,27 +594,6 @@ export const LinkInputSection: React.FC<LinkInputSectionProps> = ({
             <span>{pasteNotice}</span>
           </div>
         )}
-
-        {/* Direct clickable link to https://mediaflow-hd.ai.studio (Opens in a new tab in Chrome) */}
-        <div
-          id="home-app-download-bar"
-          className={`mt-3 pt-2.5 border-t flex items-center justify-center gap-2 text-xs sm:text-sm ${
-            isLight ? 'border-slate-200/80 text-slate-600' : 'border-slate-800/80 text-slate-300'
-          }`}
-        >
-          <span>
-            {lang === 'ur' ? 'ایپ ڈاؤن لوڈ لنک:' : 'Download App:'}
-          </span>
-          <a
-            href="https://mediaflow-hd.ai.studio"
-            target="_blank"
-            rel="noopener noreferrer"
-            id="home-direct-app-link"
-            className="font-mono font-bold text-emerald-500 hover:text-emerald-400 underline underline-offset-4 transition-colors cursor-pointer"
-          >
-            https://mediaflow-hd.ai.studio
-          </a>
-        </div>
       </div>
     </section>
   );

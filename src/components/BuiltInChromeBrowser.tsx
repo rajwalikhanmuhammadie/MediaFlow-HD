@@ -17,8 +17,12 @@ import {
   SlidersHorizontal,
   Check,
   Sparkles,
+  Clipboard,
+  Clock,
+  Trash2,
 } from 'lucide-react';
-import { Language, Theme } from '../types';
+import { Language, Theme, RecentSearchItem } from '../types';
+import { extractUrlsFromText } from '../utils/urlParser';
 import {
   ALL_BROWSER_PLATFORMS,
   BrowserPlatformFilter,
@@ -57,21 +61,65 @@ interface BuiltInChromeBrowserProps {
   lang: Language;
   theme?: Theme;
   onDownloadUrl: (videoUrl: string) => void;
+  backHandlerRef?: React.MutableRefObject<(() => boolean) | null>;
+  onBackDepthChange?: (depth: number) => void;
+  clipboardDetectedUrl?: string | null;
+  recentSearches?: RecentSearchItem[];
+  externalSearchQuery?: { query: string; tick: number } | null;
+}
+
+const BROWSER_SEARCH_HISTORY_KEY = 'mediaflow_browser_search_history_v1';
+
+function loadSavedBrowserQueries(): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(BROWSER_SEARCH_HISTORY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string' && x.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveBrowserQueryToHistory(q: string): string[] {
+  const clean = q.trim();
+  if (!clean) return loadSavedBrowserQueries();
+  const existing = loadSavedBrowserQueries().filter(
+    (item) => item.toLowerCase() !== clean.toLowerCase()
+  );
+  const next = [clean, ...existing].slice(0, 10);
+  try {
+    localStorage.setItem(BROWSER_SEARCH_HISTORY_KEY, JSON.stringify(next));
+  } catch {
+    // ignore storage errors
+  }
+  return next;
 }
 
 export const BuiltInChromeBrowser: React.FC<BuiltInChromeBrowserProps> = ({
   lang,
   theme = 'dark',
   onDownloadUrl,
+  backHandlerRef,
+  onBackDepthChange,
+  clipboardDetectedUrl,
+  recentSearches = [],
+  externalSearchQuery,
 }) => {
   const isLight = theme === 'light';
   const inputRef = useRef<HTMLInputElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const browserContainerRef = useRef<HTMLElement | null>(null);
 
   const [browserSettings, setBrowserSettings] = useState<BrowserSearchSettings>(() =>
     loadBrowserSearchSettings()
   );
   const [isPlatformSettingsOpen, setIsPlatformSettingsOpen] = useState<boolean>(false);
+  const [isSearchFocused, setIsSearchFocused] = useState<boolean>(false);
+  const [showSuggestionsDropdown, setShowSuggestionsDropdown] = useState<boolean>(false);
+  const [liveClipboardUrl, setLiveClipboardUrl] = useState<string | null>(null);
+  const [savedQueries, setSavedQueries] = useState<string[]>(() => loadSavedBrowserQueries());
 
   const initialPlatform: BrowserPlatformFilter =
     loadBrowserSearchSettings().defaultPlatform || 'all';
@@ -280,10 +328,22 @@ export const BuiltInChromeBrowser: React.FC<BuiltInChromeBrowserProps> = ({
       return;
     }
 
+    // Automatically detect if the user searched for photos/images or audio/mp3 when filter hasn't been manually locked
+    let effectiveMediaType = mediaTypeToUse;
+    if (mediaTypeOverride === undefined && selectedMediaType === 'all') {
+      if (/\b(photo|photos|image|images|pic|pics|wallpaper|wallpapers|dp|تصویر|تصاویر|فوٹو)\b/i.test(target)) {
+        effectiveMediaType = 'photo';
+      } else if (/\b(mp3|audio|ringtone|آڈیو|ایم پی تھری)\b/i.test(target)) {
+        effectiveMediaType = 'audio';
+      }
+    }
+
+    setShowSuggestionsDropdown(false);
     setQuery(target);
     setActiveQuery(target);
+    setSavedQueries(saveBrowserQueryToHistory(target));
 
-    await fetchFeedForTerm(target, platToUse, mediaTypeToUse, activeSettings);
+    await fetchFeedForTerm(target, platToUse, effectiveMediaType, activeSettings);
   };
 
   const updateSettings = (next: BrowserSearchSettings) => {
@@ -431,16 +491,150 @@ export const BuiltInChromeBrowser: React.FC<BuiltInChromeBrowserProps> = ({
   };
 
   const handleClearAndReset = () => {
-    const resetUrl = buildPlatformSearchUrl('', selectedPlatform);
+    const resetUrl = buildPlatformSearchUrl('', 'all');
+    setSelectedPlatform('all');
+    setSelectedMediaType('all');
     setQuery('');
     setActiveQuery('');
     setResults([]);
     setPlatformCounts({});
     setViewMode('results');
     setActiveWebUrl(resetUrl);
-    recordSessionNavigation(resetUrl, '', selectedPlatform, true);
-    inputRef.current?.focus();
+    recordSessionNavigation(resetUrl, '', 'all', true);
   };
+
+  // Handle external keyword search triggered from LinkInputSection
+  useEffect(() => {
+    if (externalSearchQuery && externalSearchQuery.query.trim()) {
+      const q = externalSearchQuery.query.trim();
+      setIsSearchFocused(true);
+      setShowSuggestionsDropdown(false);
+      setQuery(q);
+      executeSearchOrNavigate(q, true, 'all', 'all');
+    }
+  }, [externalSearchQuery?.tick]);
+
+  const handleSearchInputFocus = async () => {
+    setIsSearchFocused(true);
+    setShowSuggestionsDropdown(true);
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          const extracted = extractUrlsFromText(text);
+          const candidate = (extracted.length > 0 ? extracted[0] : text.trim()).trim();
+          if (/^https?:\/\/[^\s]+\.[^\s]+/i.test(candidate)) {
+            setLiveClipboardUrl(candidate);
+          }
+        }
+      }
+    } catch {
+      // ignore clipboard permission errors
+    }
+  };
+
+  const effectiveClipboardUrl = (() => {
+    const candidate = (liveClipboardUrl || clipboardDetectedUrl || '').trim();
+    if (!candidate || !/^https?:\/\/[^\s]+\.[^\s]+/i.test(candidate)) return null;
+    return candidate;
+  })();
+
+  // Build 2 to 3 recent search history items (combining recentSearches and saved browser queries)
+  const topThreeHistoryItems = (() => {
+    const list: Array<{ id: string; text: string; title?: string; isUrl: boolean; platform?: string }> = [];
+    const seen = new Set<string>();
+    if (effectiveClipboardUrl) {
+      seen.add(effectiveClipboardUrl.toLowerCase());
+    }
+
+    for (const qItem of savedQueries) {
+      const clean = qItem.trim();
+      if (!clean) continue;
+      const low = clean.toLowerCase();
+      if (seen.has(low)) continue;
+      seen.add(low);
+      list.push({
+        id: `bq_${low}`,
+        text: clean,
+        isUrl: isDirectUrl(clean),
+      });
+      if (list.length >= 3) return list;
+    }
+
+    for (const rItem of recentSearches) {
+      const clean = (rItem.url || '').trim();
+      if (!clean) continue;
+      const low = clean.toLowerCase();
+      if (seen.has(low)) continue;
+      seen.add(low);
+      list.push({
+        id: rItem.id || `rs_${low}`,
+        text: clean,
+        title: rItem.title,
+        isUrl: isDirectUrl(clean),
+        platform: rItem.platform,
+      });
+      if (list.length >= 3) return list;
+    }
+
+    return list.slice(0, 3);
+  })();
+
+  const isFullScreenActive =
+    isSearchFocused || Boolean(activeQuery.trim()) || isSearching || viewMode === 'webview';
+
+  // Expose internal back navigation for mobile hardware/gesture back button
+  const internalBackDepth =
+    (isPlatformSettingsOpen ? 1 : 0) +
+    (viewMode === 'webview' ? 1 : 0) +
+    historyIndex +
+    (activeQuery.trim() || query.trim() || selectedPlatform !== 'all' || isSearchFocused ? 1 : 0);
+
+  useEffect(() => {
+    onBackDepthChange?.(internalBackDepth);
+  }, [internalBackDepth, onBackDepthChange]);
+
+  useEffect(() => {
+    if (!backHandlerRef) return;
+    backHandlerRef.current = () => {
+      if (isPlatformSettingsOpen) {
+        setIsPlatformSettingsOpen(false);
+        return true;
+      }
+      if (viewMode === 'webview') {
+        setViewMode('results');
+        return true;
+      }
+      if (historyRef.current.index > 0) {
+        handleBack();
+        return true;
+      }
+      if (activeQuery.trim() || query.trim() || selectedPlatform !== 'all' || isSearchFocused) {
+        const resetUrl = buildPlatformSearchUrl('', 'all');
+        setSelectedPlatform('all');
+        setSelectedMediaType('all');
+        setQuery('');
+        setActiveQuery('');
+        setResults([]);
+        setPlatformCounts({});
+        setViewMode('results');
+        setActiveWebUrl(resetUrl);
+        setIsSearchFocused(false);
+        setShowSuggestionsDropdown(false);
+        inputRef.current?.blur();
+        return true;
+      }
+      return false;
+    };
+    return () => {
+      if (backHandlerRef) {
+        backHandlerRef.current = null;
+      }
+    };
+  });
 
   const getMediaTypeBadge = (item: GoogleSearchResultItem) => {
     const mType =
@@ -560,71 +754,53 @@ export const BuiltInChromeBrowser: React.FC<BuiltInChromeBrowserProps> = ({
 
   return (
     <section
-      className="w-full max-w-4xl mx-auto flex flex-col overflow-hidden"
+      ref={browserContainerRef}
+      className={
+        isFullScreenActive
+          ? `fixed inset-x-0 top-14 bottom-16 z-[75] w-full max-w-none m-0 flex flex-col overflow-hidden transition-all ${
+              isLight ? 'bg-white text-slate-900' : 'bg-[#0b0f19] text-slate-100'
+            }`
+          : 'w-full max-w-4xl mx-auto flex flex-col overflow-hidden'
+      }
       id="built-in-chrome-browser-section"
       aria-label={lang === 'ur' ? 'بلٹ ان میڈیا براؤزر' : 'Built-in Media Browser'}
     >
       <div
-        className={`w-full rounded-2xl sm:rounded-3xl border flex flex-col overflow-hidden transition-colors ${
-          isLight
-            ? 'bg-white border-slate-200 text-slate-900 shadow-sm'
-            : 'bg-[#111827] border-slate-800 text-slate-100 shadow-lg'
+        className={`w-full flex flex-col overflow-hidden transition-colors ${
+          isFullScreenActive
+            ? 'flex-1 h-full border-0 rounded-none'
+            : isLight
+            ? 'rounded-2xl sm:rounded-3xl border bg-white border-slate-200 text-slate-900 shadow-sm'
+            : 'rounded-2xl sm:rounded-3xl border bg-[#111827] border-slate-800 text-slate-100 shadow-lg'
         }`}
       >
-        {/* 1. BROWSER CONTROL BAR (Compact Top Browser Bar: Back ←, Forward →, Reload ↻, Editable Search/URL Input) */}
+        {/* 1. CLEAN SEARCH BAR (Moves to the very top of the screen when tapped/active) */}
         <div
           id="builtin-browser-top-bar"
-          className={`sticky top-0 z-20 px-2.5 sm:px-4 py-2.5 border-b shrink-0 flex items-center gap-1.5 sm:gap-2 ${
-            isLight ? 'bg-white border-slate-200' : 'bg-[#0f172a] border-slate-800'
-          }`}
+          className={`sticky top-0 z-20 px-3 sm:px-5 py-2.5 shrink-0 flex items-center gap-2 ${
+            isFullScreenActive ? 'border-b' : ''
+          } ${isLight ? 'bg-white border-slate-200' : 'bg-[#0f172a] border-slate-800'}`}
         >
-          {/* Navigation Control Buttons: Back (←), Forward (→), Reload (↻) */}
-          <div className="flex items-center gap-1 shrink-0" dir="ltr">
+          {isFullScreenActive && (
             <button
               type="button"
-              id="builtin-browser-back-btn"
-              onClick={handleBack}
-              disabled={!canGoBack}
-              className={`h-9 w-9 rounded-xl disabled:opacity-35 cursor-pointer transition-colors flex items-center justify-center ${
+              onClick={() => {
+                handleClearAndReset();
+                setIsSearchFocused(false);
+                setShowSuggestionsDropdown(false);
+                inputRef.current?.blur();
+              }}
+              className={`h-9 w-9 rounded-xl border shrink-0 flex items-center justify-center cursor-pointer transition-colors ${
                 isLight
-                  ? 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-                  : 'bg-slate-800/90 hover:bg-slate-700 text-slate-200'
+                  ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
               }`}
               title={lang === 'ur' ? 'واپس جائیں (Back)' : 'Back'}
               aria-label="Back"
             >
               <ArrowLeft className="w-4 h-4" />
             </button>
-            <button
-              type="button"
-              id="builtin-browser-forward-btn"
-              onClick={handleForward}
-              disabled={!canGoForward}
-              className={`h-9 w-9 rounded-xl disabled:opacity-35 cursor-pointer transition-colors flex items-center justify-center ${
-                isLight
-                  ? 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-                  : 'bg-slate-800/90 hover:bg-slate-700 text-slate-200'
-              }`}
-              title={lang === 'ur' ? 'آگے (Forward)' : 'Forward'}
-              aria-label="Forward"
-            >
-              <ArrowRight className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
-              id="builtin-browser-refresh-btn"
-              onClick={handleRefresh}
-              className={`h-9 w-9 rounded-xl cursor-pointer transition-colors flex items-center justify-center ${
-                isLight
-                  ? 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-                  : 'bg-slate-800/90 hover:bg-slate-700 text-slate-200'
-              }`}
-              title={lang === 'ur' ? 'ریفریش (Reload)' : 'Reload'}
-              aria-label="Refresh"
-            >
-              <RotateCw className={`w-4 h-4 ${isSearching ? 'animate-spin text-sky-500' : ''}`} />
-            </button>
-          </div>
+          )}
 
           {/* Editable Browser Search / URL Input Bar */}
           <form
@@ -632,26 +808,29 @@ export const BuiltInChromeBrowser: React.FC<BuiltInChromeBrowserProps> = ({
               e.preventDefault();
               const trimmed = query.trim();
               if (!trimmed) return;
+              setShowSuggestionsDropdown(false);
               if (isDirectUrl(trimmed)) {
                 onDownloadUrl(normalizeDirectUrl(trimmed));
               }
               executeSearchOrNavigate(trimmed);
             }}
-            className={`flex-1 flex items-center gap-1.5 px-2.5 py-1 rounded-xl border transition-all min-w-0 h-9 sm:h-10 ${
+            className={`flex-1 flex items-center gap-2 px-3 py-1.5 rounded-xl border transition-all min-w-0 h-10 sm:h-11 ${
               isLight
                 ? 'bg-slate-50 border-slate-200 focus-within:bg-white focus-within:border-sky-500'
                 : 'bg-[#070b14] border-slate-700/80 focus-within:border-sky-500'
             }`}
           >
-            <Globe className={`w-3.5 h-3.5 shrink-0 ${isLight ? 'text-sky-600' : 'text-sky-400'}`} />
+            <Search className={`w-4 h-4 shrink-0 ${isLight ? 'text-sky-600' : 'text-sky-400'}`} />
 
             <input
               ref={inputRef}
               type="text"
               value={query}
+              onFocus={handleSearchInputFocus}
               onChange={(e) => {
                 const nextVal = e.target.value;
                 setQuery(nextVal);
+                setShowSuggestionsDropdown(true);
                 const nextUrl = buildPlatformSearchUrl(nextVal, selectedPlatform);
                 setActiveWebUrl(nextUrl);
                 recordSessionNavigation(nextUrl, nextVal.trim(), selectedPlatform, false);
@@ -664,8 +843,8 @@ export const BuiltInChromeBrowser: React.FC<BuiltInChromeBrowserProps> = ({
               dir={lang === 'ur' ? 'rtl' : 'ltr'}
               placeholder={
                 lang === 'ur'
-                  ? 'براؤزر میں ویڈیو سرچ کریں یا لنک لکھیں...'
-                  : 'Search videos in browser or enter URL...'
+                  ? 'ویڈیوز، تصاویر یا آڈیو سرچ کریں یا لنک پیسٹ کریں...'
+                  : 'Search videos, photos, audio or paste link...'
               }
               className={`w-full text-xs sm:text-sm bg-transparent outline-none font-sans min-w-0 ${
                 isLight
@@ -682,7 +861,12 @@ export const BuiltInChromeBrowser: React.FC<BuiltInChromeBrowserProps> = ({
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
-                  handleClearAndReset();
+                  setQuery('');
+                  setActiveQuery('');
+                  setResults([]);
+                  setPlatformCounts({});
+                  setShowSuggestionsDropdown(true);
+                  inputRef.current?.focus();
                 }}
                 className={`p-1 rounded-full cursor-pointer shrink-0 ${
                   isLight
@@ -699,7 +883,7 @@ export const BuiltInChromeBrowser: React.FC<BuiltInChromeBrowserProps> = ({
             <button
               type="submit"
               disabled={!query.trim() || isSearching}
-              className="px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold flex items-center gap-1 disabled:opacity-40 cursor-pointer shrink-0 transition-colors whitespace-nowrap"
+              className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold flex items-center gap-1 disabled:opacity-40 cursor-pointer shrink-0 transition-colors whitespace-nowrap"
               id="builtin-browser-search-btn"
             >
               {isSearching ? (
@@ -707,308 +891,300 @@ export const BuiltInChromeBrowser: React.FC<BuiltInChromeBrowserProps> = ({
               ) : (
                 <Search className="w-3.5 h-3.5" />
               )}
-              <span className="hidden sm:inline">{lang === 'ur' ? 'سرچ' : 'Search'}</span>
+              <span>{lang === 'ur' ? 'سرچ' : 'Search'}</span>
             </button>
           </form>
-
-          {/* Compact All-Platforms Settings Button */}
-          <button
-            type="button"
-            onClick={() => setIsPlatformSettingsOpen((prev) => !prev)}
-            className={`h-9 px-2.5 rounded-xl border cursor-pointer shrink-0 flex items-center justify-center gap-1 text-xs font-semibold transition-colors ${
-              isPlatformSettingsOpen
-                ? 'bg-sky-600 text-white border-sky-500'
-                : isLight
-                ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
-            }`}
-            title={
-              lang === 'ur'
-                ? 'تمام پلیٹ فارمز کی سیٹنگز (All Platforms Settings)'
-                : 'All Platforms Search Settings'
-            }
-            id="browser-all-platforms-settings-btn"
-          >
-            <SlidersHorizontal className="w-3.5 h-3.5 text-sky-400" />
-            <span className="hidden md:inline text-[11px] font-mono">
-              {enabledCount}/12
-            </span>
-          </button>
         </div>
 
-        {/* Compact Platform & Media Filter Strip */}
-        <nav
-          dir="ltr"
-          aria-label="Media Platforms Navigation"
-          className={`px-2.5 sm:px-4 py-1.5 border-b overflow-x-auto no-scrollbar shrink-0 ${
-            isLight ? 'bg-slate-50 border-slate-200' : 'bg-[#0b1120] border-slate-800/90'
-          }`}
-        >
-          <div className="flex items-center gap-1.5 min-w-max">
-            {/* ALL PLATFORMS TAB */}
-            <button
-              type="button"
-              data-platform="all"
-              aria-pressed={selectedPlatform === 'all'}
-              onClick={() => handleSelectPlatform('all')}
-              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer transition-all whitespace-nowrap ${
-                selectedPlatform === 'all'
-                  ? 'bg-sky-600 text-white shadow-xs'
-                  : isLight
-                  ? 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200/80'
-                  : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700 hover:text-white'
-              }`}
-            >
-              <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-sky-400" />
-              <span>{lang === 'ur' ? 'All' : 'All'}</span>
-            </button>
-
-            {/* ALL 12 SOCIAL PLATFORMS */}
-            {ALL_BROWSER_PLATFORMS.map((plat) => {
-              const isActive = selectedPlatform === plat.id;
-              const isEnabled = browserSettings.enabledPlatforms[plat.id] !== false;
-              const count = platformCounts[plat.id] || 0;
-
-              return (
-                <button
-                  key={plat.id}
-                  type="button"
-                  data-platform={plat.id}
-                  aria-pressed={isActive}
-                  onClick={() => handleSelectPlatform(plat.id)}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer transition-all whitespace-nowrap ${
-                    isActive
-                      ? 'bg-sky-600 text-white shadow-xs'
-                      : !isEnabled
-                      ? isLight
-                        ? 'bg-slate-100/50 text-slate-400 hover:bg-slate-200'
-                        : 'bg-slate-900/50 text-slate-500 hover:bg-slate-800'
-                      : isLight
-                      ? 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200/80'
-                      : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700 hover:text-white'
+        {/* 2. TOP FOCUS SUGGESTIONS: Copied Link First + 2-3 Search History Items (Shown when user taps the search bar before searching) */}
+        {isFullScreenActive && (showSuggestionsDropdown || !activeQuery) && !isSearching && (
+          <div
+            id="browser-focus-suggestions-panel"
+            className={`w-full border-b px-3 sm:px-5 py-3 space-y-2.5 shrink-0 ${
+              isLight ? 'bg-slate-50/90 border-slate-200' : 'bg-[#0d1424] border-slate-800'
+            }`}
+          >
+            <div className="max-w-4xl mx-auto space-y-2.5">
+              {/* First: Copied Link from Clipboard (if user copied any link) */}
+              {effectiveClipboardUrl && (
+                <div
+                  id="browser-copied-link-suggestion"
+                  onClick={() => {
+                    setShowSuggestionsDropdown(false);
+                    onDownloadUrl(effectiveClipboardUrl);
+                  }}
+                  className={`p-3 rounded-xl border flex items-center justify-between gap-3 cursor-pointer transition-colors ${
+                    isLight
+                      ? 'bg-sky-50 border-sky-200 hover:bg-sky-100'
+                      : 'bg-sky-950/45 border-sky-500/40 hover:bg-sky-900/50'
                   }`}
                 >
-                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${plat.dotColor}`} />
-                  <span>{plat.label}</span>
-                  {activeQuery && count > 0 && (
-                    <span
-                      className={`px-1 py-0.2 rounded text-[10px] font-mono ${
-                        isActive
-                          ? 'bg-white/25 text-white'
-                          : isLight
-                          ? 'bg-slate-200 text-slate-700'
-                          : 'bg-slate-700 text-slate-300'
-                      }`}
-                    >
-                      {count}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-
-            <span className="h-4 w-px bg-slate-700/50 mx-0.5 shrink-0" />
-
-            {/* Compact Media Type Pills in Same Strip */}
-            <button
-              type="button"
-              onClick={() => handleSelectMediaType('all')}
-              className={`px-2 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap ${
-                selectedMediaType === 'all'
-                  ? isLight
-                    ? 'bg-slate-900 text-white'
-                    : 'bg-white text-slate-950'
-                  : isLight
-                  ? 'text-slate-600 hover:bg-slate-200'
-                  : 'text-slate-300 hover:bg-slate-800'
-              }`}
-            >
-              <Layers className="w-3 h-3" />
-              <span>{lang === 'ur' ? 'تمام' : 'All Media'}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleSelectMediaType('video')}
-              className={`px-2 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap ${
-                selectedMediaType === 'video'
-                  ? 'bg-rose-600 text-white'
-                  : isLight
-                  ? 'text-slate-600 hover:bg-slate-200'
-                  : 'text-slate-300 hover:bg-slate-800'
-              }`}
-            >
-              <Video className="w-3 h-3" />
-              <span>{lang === 'ur' ? 'ویڈیو' : 'Video'}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleSelectMediaType('audio')}
-              className={`px-2 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap ${
-                selectedMediaType === 'audio'
-                  ? 'bg-amber-500 text-slate-950'
-                  : isLight
-                  ? 'text-slate-600 hover:bg-slate-200'
-                  : 'text-slate-300 hover:bg-slate-800'
-              }`}
-            >
-              <Music className="w-3 h-3" />
-              <span>MP3</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleSelectMediaType('photo')}
-              className={`px-2 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap ${
-                selectedMediaType === 'photo'
-                  ? 'bg-emerald-500 text-slate-950'
-                  : isLight
-                  ? 'text-slate-600 hover:bg-slate-200'
-                  : 'text-slate-300 hover:bg-slate-800'
-              }`}
-            >
-              <ImageIcon className="w-3 h-3" />
-              <span>{lang === 'ur' ? 'فوٹو' : 'Photo'}</span>
-            </button>
-
-            {viewMode === 'webview' && (
-              <button
-                type="button"
-                onClick={() => setViewMode('results')}
-                className="px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
-              >
-                <ArrowLeft className="w-3 h-3" />
-                <span>{lang === 'ur' ? 'واپس نتائج پر' : 'Back to List'}</span>
-              </button>
-            )}
-          </div>
-        </nav>
-
-        {/* ALL-PLATFORMS SEARCH SETTINGS DRAWER / PANEL (Only when toggled open) */}
-        {isPlatformSettingsOpen && (
-          <div
-            className={`border-b p-3 sm:p-4 overflow-y-auto max-h-[55vh] shrink-0 transition-all ${
-              isLight
-                ? 'bg-white border-slate-200 text-slate-900 shadow-lg'
-                : 'bg-[#0f172a] border-slate-800 text-slate-100 shadow-2xl'
-            }`}
-            id="browser-all-platforms-settings-panel"
-          >
-            <div className="max-w-5xl mx-auto space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2.5 border-slate-200 dark:border-slate-800">
-                <h4 className="text-xs sm:text-sm font-bold flex items-center gap-2">
-                  <SlidersHorizontal className="w-4 h-4 text-sky-500" />
-                  <span>
-                    {lang === 'ur'
-                      ? 'پلیٹ فارمز سرچ سیٹنگز (All Platforms Settings)'
-                      : 'All Platforms Search Settings'}
-                  </span>
-                </h4>
-
-                <div className="flex items-center gap-2">
+                  <div className="min-w-0 flex-1" dir="ltr">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-sky-400">
+                      <Clipboard className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        {lang === 'ur' ? 'کاپی کیا گیا لنک (Copied Link)' : 'Copied Link'}
+                      </span>
+                    </div>
+                    <div className="text-xs font-mono truncate mt-0.5 opacity-90">
+                      {effectiveClipboardUrl}
+                    </div>
+                  </div>
                   <button
                     type="button"
-                    onClick={handleEnableAllPlatforms}
-                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowSuggestionsDropdown(false);
+                      onDownloadUrl(effectiveClipboardUrl);
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold flex items-center gap-1.5 shrink-0 cursor-pointer"
                   >
-                    <Check className="w-3.5 h-3.5" />
-                    <span>{lang === 'ur' ? 'سب آن کریں' : 'Enable All 12'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setIsPlatformSettingsOpen(false)}
-                    className={`px-2.5 py-1 rounded-lg border text-xs font-semibold cursor-pointer ${
-                      isLight
-                        ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
-                        : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
-                    }`}
-                  >
-                    {lang === 'ur' ? 'بند کریں' : 'Done'}
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{lang === 'ur' ? 'ڈاؤن لوڈ' : 'Download'}</span>
                   </button>
                 </div>
-              </div>
+              )}
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2" dir="ltr">
-                {ALL_BROWSER_PLATFORMS.map((plat) => {
-                  const isEnabled = browserSettings.enabledPlatforms[plat.id] !== false;
-                  return (
+              {/* Second: 2 to 3 Search History Items */}
+              {topThreeHistoryItems.length > 0 && (
+                <div
+                  className={`rounded-xl border overflow-hidden ${
+                    isLight
+                      ? 'bg-white border-slate-200 divide-y divide-slate-100'
+                      : 'bg-[#111827] border-slate-800 divide-y divide-slate-800/80'
+                  }`}
+                >
+                  <div
+                    className={`px-3 py-1.5 flex items-center justify-between text-[11px] ${
+                      isLight ? 'bg-slate-50 text-slate-500' : 'bg-[#0b0f19] text-slate-400'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1.5 font-semibold">
+                      <Clock className="w-3 h-3" />
+                      <span>{lang === 'ur' ? 'حالیہ سرچ ہسٹری' : 'Recent Search History'}</span>
+                    </span>
                     <button
-                      key={`setting_toggle_${plat.id}`}
                       type="button"
-                      onClick={() => handleTogglePlatformEnabled(plat.id)}
-                      className={`p-2 rounded-xl border text-left flex items-center justify-between gap-2 cursor-pointer transition-all ${
-                        isEnabled
-                          ? isLight
-                            ? 'bg-sky-50 border-sky-400 text-slate-900'
-                            : 'bg-sky-500/15 border-sky-500/60 text-white'
-                          : isLight
-                          ? 'bg-slate-50 border-slate-200 text-slate-400'
-                          : 'bg-slate-900/60 border-slate-800 text-slate-500'
+                      onClick={() => {
+                        try {
+                          localStorage.removeItem(BROWSER_SEARCH_HISTORY_KEY);
+                        } catch {}
+                        setSavedQueries([]);
+                      }}
+                      className="text-rose-500 hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      <span>{lang === 'ur' ? 'صاف کریں' : 'Clear'}</span>
+                    </button>
+                  </div>
+
+                  {topThreeHistoryItems.map((hItem, hIdx) => (
+                    <div
+                      key={hItem.id || hIdx}
+                      onClick={() => {
+                        setShowSuggestionsDropdown(false);
+                        setQuery(hItem.text);
+                        if (hItem.isUrl) {
+                          onDownloadUrl(normalizeDirectUrl(hItem.text));
+                        }
+                        executeSearchOrNavigate(hItem.text);
+                      }}
+                      className={`px-3 py-2.5 flex items-center justify-between gap-2.5 cursor-pointer transition-colors ${
+                        isLight ? 'hover:bg-slate-50' : 'hover:bg-slate-800/60'
                       }`}
                     >
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <span className={`w-2 h-2 rounded-full shrink-0 ${plat.dotColor}`} />
-                        <div className="text-xs font-bold truncate">{plat.label}</div>
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                        <div className="min-w-0 flex-1">
+                          {hItem.title && (
+                            <div className="text-xs font-semibold truncate">{hItem.title}</div>
+                          )}
+                          <div className="text-xs font-mono truncate opacity-85">{hItem.text}</div>
+                        </div>
                       </div>
-                      <span
-                        className={`w-4 h-4 rounded flex items-center justify-center shrink-0 text-[10px] font-bold ${
-                          isEnabled
-                            ? 'bg-emerald-500 text-slate-950'
-                            : 'bg-slate-700/40 text-slate-400'
-                        }`}
-                      >
-                        {isEnabled ? <Check className="w-3 h-3 stroke-[3]" /> : 'Off'}
+                      <span className="text-[11px] font-semibold text-sky-400 shrink-0">
+                        {hItem.isUrl
+                          ? lang === 'ur'
+                            ? 'ڈاؤن لوڈ'
+                            : 'Download'
+                          : lang === 'ur'
+                          ? 'سرچ کریں'
+                          : 'Search'}
                       </span>
-                    </button>
-                  );
-                })}
-              </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
 
-        {/* 2. BROWSER CONTENT SPACE: Clean Default State on Initial Load OR Dense Vertical Search Results List on Active Search */}
+        {/* 3. FULL-SCREEN ACTIVE SEARCH FILTER STRIP (Only shown AFTER user searches for something) */}
+        {Boolean(activeQuery.trim()) && (
+          <div
+            dir="ltr"
+            className={`px-3 sm:px-5 py-2 border-b overflow-x-auto no-scrollbar shrink-0 ${
+              isLight ? 'bg-slate-50 border-slate-200' : 'bg-[#0b1120] border-slate-800/90'
+            }`}
+          >
+            <div className="max-w-4xl mx-auto flex items-center gap-1.5 min-w-max">
+              {/* Media Type Tabs: All | Video | Photo | Audio */}
+              <button
+                type="button"
+                onClick={() => handleSelectMediaType('all')}
+                className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap ${
+                  selectedMediaType === 'all'
+                    ? isLight
+                      ? 'bg-slate-900 text-white'
+                      : 'bg-white text-slate-950'
+                    : isLight
+                    ? 'text-slate-600 hover:bg-slate-200'
+                    : 'text-slate-300 hover:bg-slate-800'
+                }`}
+              >
+                <Layers className="w-3 h-3" />
+                <span>{lang === 'ur' ? 'تمام (All)' : 'All'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleSelectMediaType('video')}
+                className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap ${
+                  selectedMediaType === 'video'
+                    ? 'bg-rose-600 text-white'
+                    : isLight
+                    ? 'text-slate-600 hover:bg-slate-200'
+                    : 'text-slate-300 hover:bg-slate-800'
+                }`}
+              >
+                <Video className="w-3 h-3" />
+                <span>{lang === 'ur' ? 'ویڈیوز' : 'Videos'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleSelectMediaType('photo')}
+                className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap ${
+                  selectedMediaType === 'photo'
+                    ? 'bg-emerald-500 text-slate-950'
+                    : isLight
+                    ? 'text-slate-600 hover:bg-slate-200'
+                    : 'text-slate-300 hover:bg-slate-800'
+                }`}
+              >
+                <ImageIcon className="w-3 h-3" />
+                <span>{lang === 'ur' ? 'تصاویر' : 'Photos'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleSelectMediaType('audio')}
+                className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap ${
+                  selectedMediaType === 'audio'
+                    ? 'bg-amber-500 text-slate-950'
+                    : isLight
+                    ? 'text-slate-600 hover:bg-slate-200'
+                    : 'text-slate-300 hover:bg-slate-800'
+                }`}
+              >
+                <Music className="w-3 h-3" />
+                <span>{lang === 'ur' ? 'آڈیو (MP3)' : 'Audio'}</span>
+              </button>
+
+              <span className="h-4 w-px bg-slate-700/50 mx-0.5 shrink-0" />
+
+              {/* Platform Filter Pills (All + 12 Platforms) */}
+              <button
+                type="button"
+                data-platform="all"
+                onClick={() => handleSelectPlatform('all')}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer transition-all whitespace-nowrap ${
+                  selectedPlatform === 'all'
+                    ? 'bg-sky-600 text-white'
+                    : isLight
+                    ? 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200/80'
+                    : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700 hover:text-white'
+                }`}
+              >
+                <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-sky-400" />
+                <span>All Platforms</span>
+              </button>
+
+              {ALL_BROWSER_PLATFORMS.map((plat) => {
+                const isActive = selectedPlatform === plat.id;
+                const count = platformCounts[plat.id] || 0;
+                return (
+                  <button
+                    key={plat.id}
+                    type="button"
+                    data-platform={plat.id}
+                    onClick={() => handleSelectPlatform(plat.id)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer transition-all whitespace-nowrap ${
+                      isActive
+                        ? 'bg-sky-600 text-white'
+                        : isLight
+                        ? 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200/80'
+                        : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700 hover:text-white'
+                    }`}
+                  >
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${plat.dotColor}`} />
+                    <span>{plat.label}</span>
+                    {count > 0 && (
+                      <span className="px-1 py-0.2 rounded text-[10px] font-mono bg-black/25">
+                        {count}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* 4. FULL-SCREEN BROWSER CONTENT SPACE: Videos, Photos, and Audio from Every Platform */}
         <div
           className={
             viewMode === 'results'
-              ? 'w-full max-h-[62vh] overflow-y-auto overscroll-contain'
+              ? isFullScreenActive
+                ? 'w-full flex-1 min-h-0 overflow-y-auto overscroll-contain'
+                : 'hidden'
               : 'hidden'
           }
           id="browser-search-results-viewport"
         >
           {isSearching ? (
-            <div className="py-12 flex flex-col items-center justify-center gap-2.5">
-              <Loader2 className="w-6 h-6 text-sky-500 animate-spin" />
+            <div className="py-16 flex flex-col items-center justify-center gap-2.5">
+              <Loader2 className="w-7 h-7 text-sky-500 animate-spin" />
               <p
                 className={`text-xs sm:text-sm font-medium ${
                   isLight ? 'text-slate-600' : 'text-slate-300'
                 }`}
               >
-                {lang === 'ur' ? 'ویڈیوز تلاش کی جا رہی ہیں...' : 'Searching videos...'}
+                {lang === 'ur'
+                  ? 'تمام پلیٹ فارمز سے ویڈیوز، تصاویر اور آڈیو تلاش کی جا رہی ہیں...'
+                  : 'Searching videos, photos & audio across all platforms...'}
               </p>
             </div>
           ) : !activeQuery ? null : results.length === 0 ? (
-            <div className="py-10 flex flex-col items-center justify-center text-center gap-2 px-4">
+            <div className="py-12 flex flex-col items-center justify-center text-center gap-2 px-4">
               <p
                 className={`text-xs sm:text-sm font-medium ${
                   isLight ? 'text-slate-500' : 'text-slate-400'
                 }`}
               >
                 {lang === 'ur'
-                  ? 'کوئی ویڈیو نہیں ملی۔ دوبارہ سرچ کریں۔'
-                  : 'No videos found for this query. Try another search.'}
+                  ? 'کوئی نتیجہ نہیں ملا۔ دوبارہ سرچ کریں۔'
+                  : 'No media found for this query. Try another search.'}
               </p>
             </div>
           ) : (
-            /* ACTIVE SEARCH STATE: Compact, Dense Vertical List View (Small Thumbnail on Left, Details on Right) */
-            <div className="w-full p-2 sm:p-3">
+            /* FULL-SCREEN ACTIVE SEARCH STATE: Videos, Photos & Audio from All Platforms */
+            <div className="w-full max-w-4xl mx-auto p-2.5 sm:p-4 pb-10">
               {/* Direct URL Quick-Download Row if user typed/pasted a URL */}
               {isDirectUrl(query) && (
                 <div
                   onClick={() => onDownloadUrl(normalizeDirectUrl(query))}
-                  className={`mb-2 p-2.5 rounded-xl border flex items-center justify-between gap-3 cursor-pointer transition-colors ${
+                  className={`mb-2.5 p-3 rounded-xl border flex items-center justify-between gap-3 cursor-pointer transition-colors ${
                     isLight
                       ? 'bg-sky-50 border-sky-200 hover:bg-sky-100'
                       : 'bg-sky-950/40 border-sky-500/40 hover:bg-sky-900/40'
