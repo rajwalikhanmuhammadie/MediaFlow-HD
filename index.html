@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      (function () {
+        // Prevent @vite/client from throwing "Error: WebSocket closed without opened." in non-HMR preview environments
+        window.addEventListener(
+          'unhandledrejection',
+          function (event) {
+            var reason = event && event.reason;
+            var msg = reason && (reason.message || String(reason));
+            if (typeof msg === 'string' && msg.indexOf('WebSocket closed without opened') !== -1) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            }
+          },
+          true
+        );
+        window.addEventListener(
+          'error',
+          function (event) {
+            var msg = (event && event.message) || '';
+            if (typeof msg === 'string' && msg.indexOf('WebSocket closed without opened') !== -1) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            }
+          },
+          true
+        );
+        var NativeWebSocket = window.WebSocket;
+        if (typeof NativeWebSocket === 'function') {
+          var PatchedWebSocket = function (url, protocols) {
+            var isViteHmr =
+              protocols === 'vite-hmr' ||
+              (Array.isArray(protocols) && protocols.indexOf('vite-hmr') !== -1) ||
+              (typeof url === 'string' && url.indexOf('token=') !== -1);
+            if (isViteHmr) {
+              var dummy = {
+                url: url,
+                readyState: 1,
+                protocol: 'vite-hmr',
+                extensions: '',
+                bufferedAmount: 0,
+                binaryType: 'blob',
+                send: function () {},
+                close: function () {
+                  this.readyState = 3;
+                },
+                addEventListener: function (type, listener) {
+                  if (type === 'open' && typeof listener === 'function') {
+                    setTimeout(function () {
+                      try {
+                        listener({ type: 'open', target: dummy });
+                      } catch (e) {}
+                    }, 10);
+                  }
+                },
+                removeEventListener: function () {},
+                dispatchEvent: function () {
+                  return true;
+                },
+                onopen: null,
+                onmessage: null,
+                onerror: null,
+                onclose: null,
+              };
+              return dummy;
+            }
+            return protocols !== undefined
+              ? new NativeWebSocket(url, protocols)
+              : new NativeWebSocket(url);
+          };
+          PatchedWebSocket.prototype = NativeWebSocket.prototype;
+          PatchedWebSocket.CONNECTING = NativeWebSocket.CONNECTING;
+          PatchedWebSocket.OPEN = NativeWebSocket.OPEN;
+          PatchedWebSocket.CLOSING = NativeWebSocket.CLOSING;
+          PatchedWebSocket.CLOSED = NativeWebSocket.CLOSED;
+          window.WebSocket = PatchedWebSocket;
+        }
+      })();
+    </script>
+    <meta name="google-site-verification" content="fGCmJ6sKdzdUuAPgzKsaLjoojEZSw-kScx45-ggY0uU" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MediaFlow HD</title>
+    <meta name="application-name" content="MediaFlow HD" />
+    <meta name="apple-mobile-web-app-title" content="MediaFlow HD" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="description" content="MediaFlow HD is a free video downloader and HD video downloader to download videos in high-quality video (4K, 1080p MP4) and MP3 audio from top platforms." />
+    <meta name="keywords" content="MediaFlow HD, HD video downloader, free video downloader, download videos, high-quality video" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+    <link rel="canonical" href="https://mediaflow-hd.ai.studio/" />
+
+    <!-- Favicon & App Icons (Unified MediaFlow HD Master Brand Assets) -->
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/pwa-512x512.png" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="sitemap" type="application/xml" title="Sitemap" href="/sitemap.xml" />
+    <meta name="theme-color" content="#060b19" />
+    <script>
+      window.__deferredPwaPrompt = null;
+      window.addEventListener('beforeinstallprompt', function (e) {
+        e.preventDefault();
+        window.__deferredPwaPrompt = e;
+        window.dispatchEvent(new CustomEvent('pwa-install-available', { detail: e }));
+      });
+      window.addEventListener('appinstalled', function () {
+        window.__deferredPwaPrompt = null;
+        window.__pwaInstalled = true;
+        try {
+          localStorage.setItem('mediaflow_pwa_installed', 'true');
+        } catch (err) {}
+        window.dispatchEvent(new CustomEvent('pwa-installed'));
+      });
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function () {});
+        });
+      }
+    </script>
+
+    <!-- Open Graph Metadata -->
+    <meta property="og:site_name" content="MediaFlow HD" />
+    <meta property="og:title" content="MediaFlow HD" />
+    <meta property="og:description" content="MediaFlow HD is a free video downloader and HD video downloader to download videos in high-quality video (4K, 1080p MP4) and MP3 audio from top platforms." />
+    <meta property="og:url" content="https://mediaflow-hd.ai.studio/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://mediaflow-hd.ai.studio/pwa-512x512.png" />
+    <meta property="og:image:alt" content="MediaFlow HD – Free HD Video Downloader Logo" />
+
+    <!-- Twitter/X Card Metadata -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="MediaFlow HD – Free HD Video Downloader" />
+    <meta name="twitter:description" content="MediaFlow HD is a free video downloader and HD video downloader to download videos in high-quality video (4K, 1080p MP4) and MP3 audio from top platforms." />
+    <meta name="twitter:image" content="https://mediaflow-hd.ai.studio/pwa-512x512.png" />
+
+    <!-- Structured Data: SoftwareApplication & WebSite -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "name": "MediaFlow HD",
+            "alternateName": "MediaFlow HD – Free HD Video Downloader",
+            "url": "https://mediaflow-hd.ai.studio/",
+            "inLanguage": ["en", "ur"],
+            "description": "MediaFlow HD is a free video downloader and HD video downloader to download videos in high-quality video (4K, 1080p MP4) and MP3 audio from top platforms."
+          },
+          {
+            "@type": "SoftwareApplication",
+            "name": "MediaFlow HD",
+            "url": "https://mediaflow-hd.ai.studio/",
+            "applicationCategory": "MultimediaApplication",
+            "operatingSystem": "Web, Android, iOS, Windows, macOS",
+            "inLanguage": ["en", "ur"],
+            "description": "MediaFlow HD is a free HD video downloader designed to download videos, reels, shorts, photos, and 320kbps MP3 audio in high-quality video resolutions from TikTok, Instagram, YouTube, Facebook, X (Twitter), Pinterest, Threads, Reddit, Snapchat, and LinkedIn.",
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD"
+            }
+          }
+        ]
+      }
+    </script>
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="root">
+      <main>
+        <h1>MediaFlow HD – Free HD Video Downloader</h1>
+        <p>MediaFlow HD is a free video downloader and HD video downloader that lets you download videos in high-quality video resolutions (4K, 2K, 1080p Full HD, 720p MP4) and 320kbps MP3 audio directly to your mobile or desktop device.</p>
+        <h2>How to Download Videos with MediaFlow HD</h2>
+        <ol>
+          <li>Copy the public video, reel, short, or post link from your favorite social platform.</li>
+          <li>Paste the link into the MediaFlow HD video downloader input box.</li>
+          <li>Select your preferred high-quality video resolution or MP3 audio format and start your download.</li>
+        </ol>
+        <h2>Supported Video Platforms</h2>
+        <p>MediaFlow HD supports public media links from TikTok, Instagram, YouTube, Facebook, X (Twitter), Pinterest, Threads, Reddit, Snapchat, and LinkedIn.</p>
+      </main>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

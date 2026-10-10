@@ -1,0 +1,6 @@
+{
+  "name": "Social Media Video Downloader",
+  "description": "MediaFlow HD is a free video downloader and HD video downloader to download videos in high-quality video (4K, 1080p MP4) and MP3 audio from top platforms.",
+  "requestFramePermissions": ["clipboard-read", "clipboard-write"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
