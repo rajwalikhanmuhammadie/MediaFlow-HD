@@ -687,26 +687,23 @@ export async function triggerBrowserDownload(
         let effectiveTotalBytes = totalBytes;
 
         if (hasExactLength && totalBytes > 0) {
-          // If stream continues past reported Content-Length before done, expand totalBytes dynamically so bar never pins at 99-100% early
-          if (receivedBytes >= totalBytes * 0.96) {
-            hasExactLength = false;
-            totalBytes = Math.round(receivedBytes + Math.max(4 * 1024 * 1024, receivedBytes * 0.35));
-            effectiveTotalBytes = totalBytes;
-          } else {
-            const ratio = Math.min(0.98, receivedBytes / totalBytes);
-            const mapped = Math.floor(baseProgress + ratio * (96 - baseProgress));
-            currentPct = Math.min(96, Math.max(baseProgress, mapped));
-            effectiveTotalBytes = totalBytes;
+          // Keep reported totalBytes solid and accurate to Content-Length
+          if (receivedBytes > totalBytes) {
+            totalBytes = receivedBytes;
           }
+          effectiveTotalBytes = totalBytes;
+          const ratio = Math.min(0.99, receivedBytes / Math.max(1, totalBytes));
+          const mapped = Math.floor(baseProgress + ratio * (98 - baseProgress));
+          currentPct = Math.min(98, Math.max(baseProgress, mapped));
         }
 
         if (!hasExactLength || totalBytes <= 0) {
-          // Smooth asymptotic byte-stream estimation when upstream Content-Length is omitted
-          if (receivedBytes >= totalBytes * 0.72) {
-            totalBytes = Math.round(receivedBytes + Math.max(6 * 1024 * 1024, receivedBytes * 0.45));
+          // Smooth asymptotic byte-stream estimation only when upstream Content-Length is omitted
+          if (receivedBytes >= totalBytes * 0.95) {
+            totalBytes = Math.round(receivedBytes + Math.max(2 * 1024 * 1024, receivedBytes * 0.2));
           }
           effectiveTotalBytes = totalBytes;
-          const ratio = Math.min(0.88, receivedBytes / effectiveTotalBytes);
+          const ratio = Math.min(0.92, receivedBytes / effectiveTotalBytes);
           const mapped = Math.floor(baseProgress + ratio * (92 - baseProgress));
           currentPct = Math.min(92, Math.max(highestProgressSoFar, mapped));
         }

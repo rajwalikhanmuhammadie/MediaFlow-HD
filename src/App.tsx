@@ -2656,6 +2656,7 @@ export default function App() {
   const [builtInBrowserBackDepth, setBuiltInBrowserBackDepth] = useState<number>(0);
   const [inAppBrowserBackDepth, setInAppBrowserBackDepth] = useState<number>(0);
   const [historyGalleryBackDepth, setHistoryGalleryBackDepth] = useState<number>(0);
+  const [isDownloadedVideoPlaying, setIsDownloadedVideoPlaying] = useState<boolean>(false);
   const [externalBrowserSearch, setExternalBrowserSearch] = useState<{
     query: string;
     tick: number;
@@ -3722,8 +3723,12 @@ export default function App() {
 
       </main>
 
-      {/* Bottom Footer Navigation Bar — 4 Clear Items: Home | Downloads | More | Settings */}
-      <footer className="fixed bottom-0 left-0 right-0 w-full z-[150] flex flex-col items-center">
+      {/* Bottom Footer Navigation Bar — 4 Clear Items: Home | Downloads | More | Settings (Hidden when full-screen video player or preview is active) */}
+      <footer
+        className={`fixed bottom-0 left-0 right-0 w-full z-[150] flex flex-col items-center transition-all duration-200 ${
+          isDownloadedVideoPlaying || isPreviewModalOpen ? 'hidden opacity-0 pointer-events-none' : ''
+        }`}
+      >
         <nav
           className={`w-full backdrop-blur-md border-t transition-colors duration-200 ${
             theme === 'light'
@@ -3950,6 +3955,7 @@ export default function App() {
         onClose={() => setIsGalleryOpen(false)}
         backHandlerRef={historyGalleryBackRef}
         onBackDepthChange={setHistoryGalleryBackDepth}
+        onPlayerOpenChange={setIsDownloadedVideoPlaying}
         history={history}
         tasks={tasks}
         recentSearches={recentSearches}

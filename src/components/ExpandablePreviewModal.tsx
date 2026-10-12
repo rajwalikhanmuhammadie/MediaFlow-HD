@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   X, 
   ArrowLeft,
@@ -30,6 +31,7 @@ import {
 import { MediaResult, Language, DownloadOption } from '../types';
 import { translations } from '../data/translations';
 import { triggerBrowserDownload } from '../utils/urlParser';
+import { DoubleTapSeekOverlay } from './DoubleTapSeekOverlay';
 
 interface ExpandablePreviewModalProps {
   media: MediaResult | null;
@@ -246,6 +248,14 @@ export const ExpandablePreviewModal: React.FC<ExpandablePreviewModalProps> = ({
     }
   };
 
+  const handleSkipSeconds = (deltaSeconds: number) => {
+    if (!videoRef.current) return;
+    const dur = videoRef.current.duration || 100;
+    const newTime = Math.max(0, Math.min(dur, videoRef.current.currentTime + deltaSeconds));
+    videoRef.current.currentTime = newTime;
+    setCurrentTime(newTime);
+  };
+
   const changeSpeed = () => {
     const rates = [0.5, 0.75, 1, 1.25, 1.5, 2];
     const nextIdx = (rates.indexOf(playbackRate) + 1) % rates.length;
@@ -373,11 +383,14 @@ export const ExpandablePreviewModal: React.FC<ExpandablePreviewModalProps> = ({
   };
 
   // Best photo option if available
-  const photoOption = media.downloadOptions.find(o => o.type === 'image' || o.format === 'JPG' || o.format === 'PNG');
+  const photoOption = media?.downloadOptions.find(o => o.type === 'image' || o.format === 'JPG' || o.format === 'PNG');
 
-  return (
+  if (!isOpen || !media) return null;
+  if (typeof document === 'undefined') return null;
+
+  return createPortal(
     <div 
-      className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 md:p-6 bg-slate-950/85 backdrop-blur-md animate-fade-in"
+      className="fixed inset-0 z-[99999] flex items-center justify-center p-2 sm:p-4 md:p-6 bg-slate-950/90 backdrop-blur-md animate-fade-in"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -477,19 +490,39 @@ export const ExpandablePreviewModal: React.FC<ExpandablePreviewModalProps> = ({
           {activeTab === 'video' && (
             <div className="relative w-full h-full flex items-center justify-center">
               {!hasVideoError ? (
-                <video
-                  ref={videoRef}
-                  key={`preview_video_${activeSourceIndex}_${fallbackVideos[activeSourceIndex] || ''}`}
-                  src={fallbackVideos[activeSourceIndex]}
-                  poster={media.thumbnail}
-                  onTimeUpdate={handleTimeUpdate}
-                  onEnded={() => setIsPlaying(false)}
-                  onError={handleVideoError}
-                  onClick={togglePlay}
-                  className="max-h-[68vh] w-auto max-w-full object-contain cursor-pointer"
-                  playsInline
-                  preload="metadata"
-                />
+                <DoubleTapSeekOverlay
+                  onSeek={handleSkipSeconds}
+                  onTogglePlay={togglePlay}
+                  lang={lang}
+                  className="flex items-center justify-center w-full h-full"
+                >
+                  <video
+                    ref={videoRef}
+                    key={`preview_video_${activeSourceIndex}_${fallbackVideos[activeSourceIndex] || ''}`}
+                    src={fallbackVideos[activeSourceIndex]}
+                    poster={media.thumbnail}
+                    onTimeUpdate={handleTimeUpdate}
+                    onEnded={() => setIsPlaying(false)}
+                    onError={handleVideoError}
+                    className="max-h-[68vh] w-auto max-w-full object-contain pointer-events-none"
+                    playsInline
+                    preload="metadata"
+                  />
+
+                  {/* Big Center Play Ripple Button if paused */}
+                  {!isPlaying && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        togglePlay();
+                      }}
+                      className="absolute inset-0 m-auto w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-blue-600/90 text-white flex items-center justify-center shadow-2xl hover:scale-110 active:scale-95 transition-transform cursor-pointer border border-white/20 z-20"
+                    >
+                      <Play className="w-8 h-8 sm:w-10 sm:h-10 fill-white ml-1.5" />
+                    </button>
+                  )}
+                </DoubleTapSeekOverlay>
               ) : (
                 <div className="flex flex-col items-center justify-center p-8 text-center text-slate-400">
                   <img 
@@ -512,16 +545,6 @@ export const ExpandablePreviewModal: React.FC<ExpandablePreviewModalProps> = ({
                     {t.startDownload}
                   </button>
                 </div>
-              )}
-
-              {/* Big Center Play Ripple Button if paused */}
-              {!isPlaying && !hasVideoError && (
-                <button
-                  onClick={togglePlay}
-                  className="absolute inset-0 m-auto w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-blue-600/90 text-white flex items-center justify-center shadow-2xl hover:scale-110 active:scale-95 transition-transform cursor-pointer border border-white/20"
-                >
-                  <Play className="w-8 h-8 sm:w-10 sm:h-10 fill-white ml-1.5" />
-                </button>
               )}
             </div>
           )}
@@ -774,6 +797,7 @@ export const ExpandablePreviewModal: React.FC<ExpandablePreviewModalProps> = ({
         )}
 
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };

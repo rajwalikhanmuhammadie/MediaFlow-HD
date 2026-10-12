@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
   X,
   FolderDown,
@@ -69,6 +70,7 @@ import {
   renameHistoryItem,
   toggleHideHistoryItem,
 } from '../utils/urlParser';
+import { DoubleTapSeekOverlay } from './DoubleTapSeekOverlay';
 
 type SortCriterion = 'date' | 'size' | 'name' | 'duration' | 'resolution';
 type SortDirection = 'desc' | 'asc';
@@ -104,6 +106,7 @@ interface HistoryGalleryProps {
   onRetryTask?: (id: string) => void;
   backHandlerRef?: React.MutableRefObject<(() => boolean) | null>;
   onBackDepthChange?: (depth: number) => void;
+  onPlayerOpenChange?: (isOpen: boolean) => void;
 }
 
 export const HistoryGallery: React.FC<HistoryGalleryProps> = ({
@@ -129,6 +132,7 @@ export const HistoryGallery: React.FC<HistoryGalleryProps> = ({
   onRetryTask,
   backHandlerRef,
   onBackDepthChange,
+  onPlayerOpenChange,
 }) => {
   const [activeTab, setActiveTab] = useState<'downloads' | 'hidden' | 'recent_searches'>('downloads');
   const [search, setSearch] = useState('');
@@ -148,8 +152,26 @@ export const HistoryGallery: React.FC<HistoryGalleryProps> = ({
   const [playerVolume, setPlayerVolume] = useState<number>(1);
   const [isPlayerMuted, setIsPlayerMuted] = useState<boolean>(false);
   const [isPlayerFullscreen, setIsPlayerFullscreen] = useState<boolean>(false);
+  const [centerFeedbackIcon, setCenterFeedbackIcon] = useState<'play' | 'pause' | 'forward' | 'rewind' | null>(null);
   const videoPlayerRef = useRef<HTMLVideoElement | null>(null);
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
+  const feedbackTimeoutRef = useRef<number | null>(null);
+
+  // Sync player open/closed state with parent (to hide footer and sync mobile UI)
+  useEffect(() => {
+    onPlayerOpenChange?.(!!playingItem);
+  }, [playingItem, onPlayerOpenChange]);
+
+  // Lock body scroll and set viewport styling while full-screen player is open
+  useEffect(() => {
+    if (playingItem) {
+      const prevOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = prevOverflow;
+      };
+    }
+  }, [playingItem]);
 
   // Three-Dots Context Menu (⋮) Bottom Sheet State
   const [contextMenuItem, setContextMenuItem] = useState<HistoryItem | null>(null);
@@ -630,15 +652,27 @@ export const HistoryGallery: React.FC<HistoryGalleryProps> = ({
     showToast(lang === 'ur' ? 'فائل کا نام تبدیل کر دیا گیا' : 'File renamed successfully');
   };
 
+  const showCenterFeedback = (type: 'play' | 'pause' | 'forward' | 'rewind') => {
+    setCenterFeedbackIcon(type);
+    if (feedbackTimeoutRef.current) clearTimeout(feedbackTimeoutRef.current);
+    feedbackTimeoutRef.current = window.setTimeout(() => {
+      setCenterFeedbackIcon(null);
+    }, 650);
+  };
+
   // Fullscreen Media Player Controls
   const togglePlayerPlay = () => {
     const vid = videoPlayerRef.current;
     if (!vid) return;
     if (vid.paused) {
-      vid.play().then(() => setIsPlayerPlaying(true)).catch(() => {});
+      vid.play().then(() => {
+        setIsPlayerPlaying(true);
+        showCenterFeedback('play');
+      }).catch(() => {});
     } else {
       vid.pause();
       setIsPlayerPlaying(false);
+      showCenterFeedback('pause');
     }
   };
 
@@ -656,6 +690,7 @@ export const HistoryGallery: React.FC<HistoryGalleryProps> = ({
     const nextTime = Math.max(0, Math.min(vid.duration || 100, vid.currentTime + deltaSeconds));
     vid.currentTime = nextTime;
     setPlayerCurrentTime(nextTime);
+    showCenterFeedback(deltaSeconds > 0 ? 'forward' : 'rewind');
   };
 
   const handlePlayerMuteToggle = () => {
@@ -1573,233 +1608,247 @@ export const HistoryGallery: React.FC<HistoryGalleryProps> = ({
         </div>
       )}
 
-      {/* 5. FULL-SCREEN MEDIA PLAYER MODAL WITH RESPONSIVE VIDEO CONTROLS BELOW PLAYER */}
-      {playingItem && (
-        <div
-          ref={playerContainerRef}
-          className="fixed inset-0 z-[90] bg-black/95 backdrop-blur-xl flex flex-col justify-between animate-fade-in"
-          id="history-instant-player-overlay"
-        >
-          {/* Top Bar with Prominent Mobile Back Button */}
-          <div className="px-3 sm:px-4 py-3 bg-gradient-to-b from-black/95 via-black/80 to-transparent flex items-center justify-between gap-2.5 z-20">
-            <div className="flex items-center gap-2.5 min-w-0 flex-1">
-              <button
-                type="button"
-                id="history-player-back-btn"
-                onClick={() => setPlayingItem(null)}
-                className="px-3 sm:px-3.5 py-2 rounded-xl bg-white/15 hover:bg-white/25 active:scale-95 text-white text-xs sm:text-sm font-extrabold flex items-center gap-1.5 border border-white/20 shadow-lg cursor-pointer shrink-0 transition-all"
-                title={lang === 'ur' ? 'واپس جائیں' : 'Back'}
-              >
-                <ArrowLeft className="w-4 h-4 text-[#FFCC00]" />
-                <span>{lang === 'ur' ? 'واپس' : 'Back'}</span>
-              </button>
-
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5 text-[11px] sm:text-xs text-slate-300 font-mono tabular-nums">
-                  <span className="text-[#FFCC00] font-bold uppercase">{playingItem.platform}</span>
-                  <span>·</span>
-                  <span>{getCleanResolutionBadge(playingItem)}</span>
-                </div>
-                <h4 className="text-xs sm:text-sm font-bold text-white truncate mt-0.5">
-                  {playingItem.title}
-                </h4>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-              {onGoToPage && (
+      {/* 5. FULL-SCREEN MEDIA PLAYER MODAL WITH RESPONSIVE VIDEO CONTROLS (ABOVE & BELOW VIDEO, PORTALED TO BODY AT z-[99999] SO FOOTER NEVER HIDES IT) */}
+      {playingItem &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            ref={playerContainerRef}
+            className="fixed inset-0 z-[99999] w-screen h-screen h-[100dvh] bg-black text-white flex flex-col justify-between overflow-hidden animate-fade-in select-none"
+            id="history-instant-player-overlay"
+            style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0 }}
+          >
+            {/* Top Bar (اوپر): Back Button, Platform & Resolution Badges, Video Title & Actions */}
+            <div
+              className="px-3 sm:px-5 pt-safe pt-3 pb-3 bg-gradient-to-b from-black via-black/90 to-transparent flex items-center justify-between gap-2.5 z-30 shrink-0"
+              id="history-player-top-bar"
+            >
+              <div className="flex items-center gap-2.5 min-w-0 flex-1">
                 <button
                   type="button"
-                  onClick={() => {
-                    const itemToOpen = playingItem;
-                    setPlayingItem(null);
-                    onGoToPage(itemToOpen);
-                  }}
-                  className="px-2.5 sm:px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  id="history-player-back-btn"
+                  onClick={() => setPlayingItem(null)}
+                  className="px-3 sm:px-3.5 py-2 rounded-xl bg-white/15 hover:bg-white/25 active:scale-95 text-white text-xs sm:text-sm font-extrabold flex items-center gap-1.5 border border-white/20 shadow-lg cursor-pointer shrink-0 transition-all"
+                  title={lang === 'ur' ? 'واپس جائیں' : 'Back'}
                 >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Go to Page</span>
+                  <ArrowLeft className="w-4 h-4 text-[#FFCC00]" />
+                  <span>{lang === 'ur' ? 'واپس' : 'Back'}</span>
                 </button>
-              )}
-              <button
-                type="button"
-                onClick={() => onReDownload(playingItem)}
-                className="px-3 py-2 rounded-xl bg-[#FFCC00] hover:bg-[#f2c200] text-slate-950 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>{lang === 'ur' ? 'محفوظ کریں' : 'Save'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setPlayingItem(null)}
-                className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white cursor-pointer"
-                title={t.close}
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-          </div>
 
-          {/* Center Media Canvas */}
-          <div
-            className="flex-1 flex items-center justify-center p-2 sm:p-4 overflow-hidden relative"
-            onClick={togglePlayerPlay}
-          >
-            {playingItem.type === 'image' ? (
-              <img
-                src={getPlayableStreamUrl(playingItem)}
-                alt={playingItem.title}
-                className="max-w-full max-h-[75vh] object-contain rounded-2xl shadow-2xl"
-                referrerPolicy="no-referrer"
-              />
-            ) : (
-              <video
-                ref={videoPlayerRef}
-                src={getPlayableStreamUrl(playingItem)}
-                poster={playingItem.thumbnail}
-                autoPlay
-                playsInline
-                onTimeUpdate={() => {
-                  if (videoPlayerRef.current) {
-                    setPlayerCurrentTime(videoPlayerRef.current.currentTime);
-                    setPlayerDuration(videoPlayerRef.current.duration || 0);
-                  }
-                }}
-                onLoadedMetadata={() => {
-                  if (videoPlayerRef.current) {
-                    setPlayerDuration(videoPlayerRef.current.duration || 0);
-                  }
-                }}
-                onPlay={() => setIsPlayerPlaying(true)}
-                onPause={() => setIsPlayerPlaying(false)}
-                onEnded={() => setIsPlayerPlaying(false)}
-                className="max-w-full max-h-[72vh] w-auto h-auto rounded-xl shadow-2xl bg-black"
-              />
-            )}
-          </div>
-
-          {/* Responsive Video Control Buttons Below Video Player (Play/Pause, Seekbar, Forward/Rewind, Volume, Fullscreen) */}
-          {playingItem.type !== 'image' && (
-            <div
-              id="media-player-bottom-controls"
-              onClick={(e) => e.stopPropagation()}
-              className="w-full max-w-3xl mx-auto px-4 py-3.5 bg-[#141720]/95 border-t sm:border border-white/10 sm:rounded-2xl sm:mb-4 space-y-2.5 z-20"
-            >
-              {/* Seekbar Row */}
-              <div className="flex items-center gap-3">
-                <span className="text-xs font-mono tabular-nums text-slate-300 w-11 text-right">
-                  {formatPlayerTime(playerCurrentTime)}
-                </span>
-                <input
-                  type="range"
-                  min={0}
-                  max={playerDuration || 100}
-                  step={0.1}
-                  value={playerCurrentTime}
-                  onChange={handlePlayerSeek}
-                  className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-[#FFCC00]"
-                  aria-label="Seek video timeline"
-                />
-                <span className="text-xs font-mono tabular-nums text-slate-300 w-11">
-                  {formatPlayerTime(playerDuration)}
-                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 text-[11px] sm:text-xs text-slate-300 font-mono tabular-nums">
+                    <span className="text-[#FFCC00] font-bold uppercase">{playingItem.platform}</span>
+                    <span>·</span>
+                    <span>{getCleanResolutionBadge(playingItem)}</span>
+                  </div>
+                  <h4 className="text-xs sm:text-sm font-bold text-white truncate mt-0.5">
+                    {playingItem.title}
+                  </h4>
+                </div>
               </div>
 
-              {/* Control Buttons Row: Play/Pause, Rewind (-10s), Forward (+10s), Volume, Fullscreen */}
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 sm:gap-2.5">
-                  {/* Play / Pause */}
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                {onGoToPage && (
                   <button
                     type="button"
-                    onClick={togglePlayerPlay}
-                    className="w-10 h-10 rounded-xl bg-[#FFCC00] hover:bg-[#f2c200] text-slate-950 flex items-center justify-center cursor-pointer transition-transform active:scale-95"
-                    title={isPlayerPlaying ? 'Pause' : 'Play'}
+                    onClick={() => {
+                      const itemToOpen = playingItem;
+                      setPlayingItem(null);
+                      onGoToPage(itemToOpen);
+                    }}
+                    className="px-2.5 sm:px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
                   >
-                    {isPlayerPlaying ? (
-                      <Pause className="w-5 h-5 fill-current" />
-                    ) : (
-                      <Play className="w-5 h-5 fill-current ml-0.5" />
-                    )}
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Go to Page</span>
                   </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onReDownload(playingItem)}
+                  className="px-3 py-2 rounded-xl bg-[#FFCC00] hover:bg-[#f2c200] text-slate-950 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer shadow-md"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>{lang === 'ur' ? 'محفوظ کریں' : 'Save'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPlayingItem(null)}
+                  className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white cursor-pointer"
+                  title={t.close}
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
 
-                  {/* Rewind -10s */}
-                  <button
-                    type="button"
-                    onClick={() => handlePlayerSkip(-10)}
-                    className="h-10 px-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-white text-xs font-mono font-bold flex items-center gap-1 cursor-pointer"
-                    title="Rewind 10 seconds"
-                  >
-                    <RotateCcw className="w-4 h-4" />
-                    <span>-10s</span>
-                  </button>
+            {/* Center Media Canvas (True Mobile Full Screen, with Single-Tap Play/Pause & Double-Tap Seek) */}
+            <div
+              className="flex-1 w-full h-full min-h-0 flex items-center justify-center p-0 sm:p-2 overflow-hidden relative bg-black select-none"
+              id="history-player-canvas"
+            >
+              {playingItem.type === 'image' ? (
+                <img
+                  src={getPlayableStreamUrl(playingItem)}
+                  alt={playingItem.title}
+                  className="w-full h-full max-w-full max-h-full object-contain"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <DoubleTapSeekOverlay
+                  onSeek={handlePlayerSkip}
+                  onTogglePlay={togglePlayerPlay}
+                  lang={lang}
+                  className="flex items-center justify-center"
+                >
+                  <video
+                    ref={videoPlayerRef}
+                    src={getPlayableStreamUrl(playingItem)}
+                    poster={playingItem.thumbnail}
+                    autoPlay
+                    playsInline
+                    onTimeUpdate={() => {
+                      if (videoPlayerRef.current) {
+                        setPlayerCurrentTime(videoPlayerRef.current.currentTime);
+                        setPlayerDuration(videoPlayerRef.current.duration || 0);
+                      }
+                    }}
+                    onLoadedMetadata={() => {
+                      if (videoPlayerRef.current) {
+                        setPlayerDuration(videoPlayerRef.current.duration || 0);
+                      }
+                    }}
+                    onPlay={() => setIsPlayerPlaying(true)}
+                    onPause={() => setIsPlayerPlaying(false)}
+                    onEnded={() => setIsPlayerPlaying(false)}
+                    className="w-full h-full max-w-full max-h-full object-contain bg-black shadow-2xl pointer-events-none"
+                  />
+                </DoubleTapSeekOverlay>
+              )}
+            </div>
 
-                  {/* Forward +10s */}
-                  <button
-                    type="button"
-                    onClick={() => handlePlayerSkip(10)}
-                    className="h-10 px-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-white text-xs font-mono font-bold flex items-center gap-1 cursor-pointer"
-                    title="Forward 10 seconds"
-                  >
-                    <RotateCw className="w-4 h-4" />
-                    <span>+10s</span>
-                  </button>
+            {/* Responsive Video Control Buttons (نیچے): Seekbar + Big Buttons, elevated with pb-safe pb-6 so footer never covers it */}
+            {playingItem.type !== 'image' && (
+              <div
+                id="media-player-bottom-controls"
+                onClick={(e) => e.stopPropagation()}
+                className="w-full max-w-3xl mx-auto px-4 pt-3 pb-safe pb-6 sm:pb-4 bg-gradient-to-t from-black via-black/95 to-transparent sm:rounded-2xl sm:mb-4 space-y-2.5 z-30 shrink-0"
+              >
+                {/* Seekbar Row */}
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-mono tabular-nums text-slate-300 w-11 text-right">
+                    {formatPlayerTime(playerCurrentTime)}
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={playerDuration || 100}
+                    step={0.1}
+                    value={playerCurrentTime}
+                    onChange={handlePlayerSeek}
+                    className="flex-1 h-2 bg-slate-700/80 rounded-lg appearance-none cursor-pointer accent-[#FFCC00]"
+                    aria-label="Seek video timeline"
+                  />
+                  <span className="text-xs font-mono tabular-nums text-slate-300 w-11">
+                    {formatPlayerTime(playerDuration)}
+                  </span>
+                </div>
 
-                  {/* Volume Mute + Slider */}
-                  <div className="flex items-center gap-1.5 pl-1">
+                {/* Control Buttons Row: Play/Pause, Rewind (-10s), Forward (+10s), Volume, Back, Fullscreen */}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 sm:gap-2.5">
+                    {/* Play / Pause */}
                     <button
                       type="button"
-                      onClick={handlePlayerMuteToggle}
-                      className="w-9 h-9 rounded-xl bg-white/5 hover:bg-white/15 text-slate-200 flex items-center justify-center cursor-pointer"
-                      title={isPlayerMuted ? 'Unmute' : 'Mute'}
+                      onClick={togglePlayerPlay}
+                      className="w-11 h-11 rounded-xl bg-[#FFCC00] hover:bg-[#f2c200] text-slate-950 flex items-center justify-center cursor-pointer transition-transform active:scale-95 shadow-lg"
+                      title={isPlayerPlaying ? 'Pause' : 'Play'}
                     >
-                      {isPlayerMuted ? (
-                        <VolumeX className="w-4 h-4 text-rose-400" />
+                      {isPlayerPlaying ? (
+                        <Pause className="w-5 h-5 fill-current" />
                       ) : (
-                        <Volume2 className="w-4 h-4" />
+                        <Play className="w-5 h-5 fill-current ml-0.5" />
                       )}
                     </button>
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      value={isPlayerMuted ? 0 : playerVolume}
-                      onChange={handlePlayerVolumeChange}
-                      className="hidden sm:block w-20 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-[#FFCC00]"
-                      aria-label="Volume"
-                    />
+
+                    {/* Rewind -10s */}
+                    <button
+                      type="button"
+                      onClick={() => handlePlayerSkip(-10)}
+                      className="h-10 px-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-white text-xs font-mono font-bold flex items-center gap-1 cursor-pointer active:scale-95"
+                      title="Rewind 10 seconds"
+                    >
+                      <RotateCcw className="w-4 h-4 text-[#FFCC00]" />
+                      <span>-10s</span>
+                    </button>
+
+                    {/* Forward +10s */}
+                    <button
+                      type="button"
+                      onClick={() => handlePlayerSkip(10)}
+                      className="h-10 px-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-white text-xs font-mono font-bold flex items-center gap-1 cursor-pointer active:scale-95"
+                      title="Forward 10 seconds"
+                    >
+                      <RotateCw className="w-4 h-4 text-[#FFCC00]" />
+                      <span>+10s</span>
+                    </button>
+
+                    {/* Volume Mute + Slider */}
+                    <div className="flex items-center gap-1.5 pl-1">
+                      <button
+                        type="button"
+                        onClick={handlePlayerMuteToggle}
+                        className="w-10 h-10 rounded-xl bg-white/10 hover:bg-white/20 text-slate-200 flex items-center justify-center cursor-pointer active:scale-95"
+                        title={isPlayerMuted ? 'Unmute' : 'Mute'}
+                      >
+                        {isPlayerMuted ? (
+                          <VolumeX className="w-4 h-4 text-rose-400" />
+                        ) : (
+                          <Volume2 className="w-4 h-4" />
+                        )}
+                      </button>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={isPlayerMuted ? 0 : playerVolume}
+                        onChange={handlePlayerVolumeChange}
+                        className="hidden sm:block w-20 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-[#FFCC00]"
+                        aria-label="Volume"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Right Controls: Back to Gallery + Fullscreen Toggle */}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPlayingItem(null)}
+                      className="h-10 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center gap-1.5 border border-white/15 cursor-pointer active:scale-95"
+                      title={lang === 'ur' ? 'واپس جائیں' : 'Back'}
+                    >
+                      <ArrowLeft className="w-4 h-4 text-[#FFCC00]" />
+                      <span>{lang === 'ur' ? 'واپس' : 'Back'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handlePlayerFullscreenToggle}
+                      className="w-10 h-10 rounded-xl bg-white/10 hover:bg-white/20 text-white flex items-center justify-center cursor-pointer active:scale-95"
+                      title="Fullscreen"
+                    >
+                      {isPlayerFullscreen ? (
+                        <Minimize2 className="w-4 h-4" />
+                      ) : (
+                        <Maximize2 className="w-4 h-4" />
+                      )}
+                    </button>
                   </div>
                 </div>
-
-                {/* Right Controls: Back to Gallery + Fullscreen Toggle */}
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setPlayingItem(null)}
-                    className="h-10 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center gap-1.5 border border-white/15 cursor-pointer"
-                    title={lang === 'ur' ? 'واپس جائیں' : 'Back'}
-                  >
-                    <ArrowLeft className="w-4 h-4 text-[#FFCC00]" />
-                    <span>{lang === 'ur' ? 'واپس' : 'Back'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handlePlayerFullscreenToggle}
-                    className="w-10 h-10 rounded-xl bg-white/10 hover:bg-white/20 text-white flex items-center justify-center cursor-pointer"
-                    title="Fullscreen"
-                  >
-                    {isPlayerFullscreen ? (
-                      <Minimize2 className="w-4 h-4" />
-                    ) : (
-                      <Maximize2 className="w-4 h-4" />
-                    )}
-                  </button>
-                </div>
               </div>
-            </div>
-          )}
-        </div>
-      )}
+            )}
+          </div>,
+          document.body
+        )}
 
       {/* Toast Notification */}
       {toastMessage && (

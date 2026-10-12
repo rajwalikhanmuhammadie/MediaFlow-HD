@@ -881,6 +881,80 @@ async function startServer() {
     return false;
   }
 
+  // Exact file size probe engine: checks Content-Length and Range: bytes=0-0 Content-Range without downloading full files
+  const mediaSizeProbeCache = new Map<string, { bytes: number; expiresAt: number }>();
+
+  async function probeExactContentLength(
+    mediaUrl: string | undefined | null,
+    sessionOpts?: PlatformBrowserSessionOptions
+  ): Promise<number> {
+    if (!mediaUrl || typeof mediaUrl !== "string" || !mediaUrl.startsWith("http")) return 0;
+    const clean = mediaUrl.trim();
+    if (clean.includes(".m3u8")) return 0;
+
+    const cached = mediaSizeProbeCache.get(clean);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.bytes;
+    }
+
+    try {
+      const headers = getUpstreamMediaHeaders(clean, {}, sessionOpts);
+
+      // Attempt 1: Fast HTTP HEAD (2.2s timeout)
+      const headRes = await fetch(clean, {
+        method: "HEAD",
+        headers,
+        signal: AbortSignal.timeout(2200),
+      }).catch(() => null);
+
+      if (headRes && headRes.ok) {
+        const cl = headRes.headers.get("content-length");
+        const len = cl ? parseInt(cl, 10) : 0;
+        if (len > 0) {
+          mediaSizeProbeCache.set(clean, { bytes: len, expiresAt: Date.now() + 60 * 60 * 1000 });
+          return len;
+        }
+      }
+
+      // Attempt 2: Range: bytes=0-0 GET (downloads only 1 byte, server returns total length in Content-Range)
+      const rangeRes = await fetch(clean, {
+        method: "GET",
+        headers: { ...headers, Range: "bytes=0-0" },
+        signal: AbortSignal.timeout(2800),
+      }).catch(() => null);
+
+      if (rangeRes && (rangeRes.status === 206 || rangeRes.ok)) {
+        const cr = rangeRes.headers.get("content-range"); // e.g. bytes 0-0/7542891
+        if (cr) {
+          const match = cr.match(/\/(\d+)/);
+          if (match?.[1]) {
+            const total = parseInt(match[1], 10);
+            if (total > 0) {
+              mediaSizeProbeCache.set(clean, { bytes: total, expiresAt: Date.now() + 60 * 60 * 1000 });
+              return total;
+            }
+          }
+        }
+        const cl = rangeRes.headers.get("content-length");
+        const len = cl ? parseInt(cl, 10) : 0;
+        if (rangeRes.status === 200 && len > 0) {
+          mediaSizeProbeCache.set(clean, { bytes: len, expiresAt: Date.now() + 60 * 60 * 1000 });
+          return len;
+        }
+      }
+    } catch {}
+
+    return 0;
+  }
+
+  function formatBytesToReadable(bytes: number): string {
+    if (!bytes || bytes <= 0 || isNaN(bytes)) return "0 MB";
+    if (bytes >= 1024 * 1024 * 1024) {
+      return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+    }
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
   // Extract content from <meta> tag regardless of attribute order (property/name before or after content)
   function extractMetaTagContent(html: string, key: string): string | undefined {
     const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1394,20 +1468,20 @@ async function startServer() {
 
           const chosenVideo = removeWatermark ? (hdVideo || noWmVideo || wmVideo) : (wmVideo || noWmVideo || hdVideo);
           if (chosenVideo || (Array.isArray(d.images) && d.images.length > 0)) {
-            const hdSizeMb = d.hd_size
-              ? (d.hd_size / (1024 * 1024)).toFixed(1) + " MB"
-              : d.size
-              ? ((d.size * 1.15) / (1024 * 1024)).toFixed(1) + " MB"
-              : "4.2 MB";
-            const sdSizeMb = d.size ? (d.size / (1024 * 1024)).toFixed(1) + " MB" : "2.8 MB";
-            const wmSizeMb = d.wm_size ? (d.wm_size / (1024 * 1024)).toFixed(1) + " MB" : sdSizeMb;
+            const hdExactBytes = Number(d.hd_size) || (hdVideo ? await probeExactContentLength(hdVideo, sessionOpts) : 0);
+            const sdExactBytes = Number(d.size) || (noWmVideo ? await probeExactContentLength(noWmVideo, sessionOpts) : 0);
+            const wmExactBytes = Number(d.wm_size) || (wmVideo ? await probeExactContentLength(wmVideo, sessionOpts) : 0);
+
+            const hdSizeMb = hdExactBytes > 0 ? formatBytesToReadable(hdExactBytes) : "4.2 MB";
+            const sdSizeMb = sdExactBytes > 0 ? formatBytesToReadable(sdExactBytes) : "2.8 MB";
+            const wmSizeMb = wmExactBytes > 0 ? formatBytesToReadable(wmExactBytes) : sdSizeMb;
 
             const downloadOptions: ExtractedMediaData["downloadOptions"] = [];
 
             const rawW = Number(d.width) || 0;
             const rawH = Number(d.height) || 0;
             const hasDistinctHd = Boolean(
-              hdVideo && (!noWmVideo || hdVideo !== noWmVideo) && (!d.hd_size || !d.size || d.hd_size > d.size)
+              hdVideo && (!noWmVideo || hdVideo !== noWmVideo) && (!hdExactBytes || !sdExactBytes || hdExactBytes > sdExactBytes)
             );
             const detectedSourceTier =
               rawW > 0 || rawH > 0
@@ -1431,6 +1505,7 @@ async function startServer() {
                 type: "video",
                 badge: `${topTier}p Clean`,
                 noWatermark: true,
+                filesize: hdExactBytes > 0 ? hdExactBytes : undefined,
               });
             }
 
@@ -1447,6 +1522,7 @@ async function startServer() {
                 type: "video",
                 badge: "No Watermark",
                 noWatermark: true,
+                filesize: sdExactBytes > 0 ? sdExactBytes : undefined,
               });
             }
 
@@ -1463,6 +1539,7 @@ async function startServer() {
                 type: "video",
                 badge: "Watermarked",
                 noWatermark: false,
+                filesize: wmExactBytes > 0 ? wmExactBytes : undefined,
               });
             }
 
@@ -2190,14 +2267,18 @@ async function startServer() {
       const downloadOptions: ExtractedMediaData["downloadOptions"] = [];
       const seenFbTiers = new Set<number>();
 
+      const hdBytes = hdUrl ? await probeExactContentLength(hdUrl, sessionOpts) : 0;
+      const sdBytes = sdUrl ? await probeExactContentLength(sdUrl, sessionOpts) : 0;
+
       if (hdUrl) {
         seenFbTiers.add(1080);
+        const hdSizeLabel = hdBytes > 0 ? formatBytesToReadable(hdBytes) : `${Math.max(3.8, Math.round(fbDurationSec * 0.22 * 10) / 10)} MB`;
         downloadOptions.push({
           id: "opt-1080p",
           label: "1080p Full HD (MP4)",
           resolution: "1080p",
           format: "MP4",
-          size: Math.max(3.8, Math.round(fbDurationSec * 0.22 * 10) / 10) + " MB",
+          size: hdSizeLabel,
           quality: "Full HD (1080p)",
           url: `/api/download?url=${encodeURIComponent(canonicalUrl)}&directUrl=${encodeURIComponent(hdUrl)}&format=mp4&height=1080`,
           type: "video",
@@ -2205,23 +2286,26 @@ async function startServer() {
           noWatermark: true,
           width: 1080,
           height: 1920,
+          filesize: hdBytes > 0 ? hdBytes : undefined,
         });
       }
 
       if (sdUrl) {
         const sdTier = hdUrl ? 720 : 1080;
         seenFbTiers.add(sdTier);
+        const sdSizeLabel = sdBytes > 0 ? formatBytesToReadable(sdBytes) : `${Math.max(2.2, Math.round(fbDurationSec * 0.13 * 10) / 10)} MB`;
         downloadOptions.push({
           id: `opt-${sdTier}p`,
           label: `${sdTier}p HD (MP4)`,
           resolution: `${sdTier}p`,
           format: "MP4",
-          size: Math.max(2.2, Math.round(fbDurationSec * 0.13 * 10) / 10) + " MB",
+          size: sdSizeLabel,
           quality: `HD (${sdTier}p)`,
           url: `/api/download?url=${encodeURIComponent(canonicalUrl)}&directUrl=${encodeURIComponent(sdUrl)}&format=mp4&height=${sdTier}`,
           type: "video",
           badge: hdUrl ? "720p HD" : "Original Source Quality",
           noWatermark: true,
+          filesize: sdBytes > 0 ? sdBytes : undefined,
         });
       }
 
@@ -2230,7 +2314,10 @@ async function startServer() {
         const norm = normalizeResolutionTier(rep.width, rep.height, rep.qualityLabel);
         if (!norm || seenFbTiers.has(norm.tier)) continue;
         seenFbTiers.add(norm.tier);
-        const estMb = rep.bandwidth > 0
+        const repBytes = rep.url ? await probeExactContentLength(rep.url, sessionOpts) : 0;
+        const estMb = repBytes > 0
+          ? formatBytesToReadable(repBytes)
+          : rep.bandwidth > 0
           ? Math.max(0.8, Math.round(((rep.bandwidth / 8) * fbDurationSec) / (1024 * 1024) * 10) / 10) + " MB"
           : Math.max(1.0, Math.round(fbDurationSec * (norm.tier / 720) * 0.14 * 10) / 10) + " MB";
         downloadOptions.push({
@@ -2246,6 +2333,7 @@ async function startServer() {
           noWatermark: true,
           width: rep.width || undefined,
           height: rep.height || undefined,
+          filesize: repBytes > 0 ? repBytes : undefined,
         });
       }
 
@@ -2826,12 +2914,14 @@ async function startServer() {
           const norm = normalizeResolutionTier(vw, vh);
           if (norm && !seenIgTiers.has(norm.tier)) {
             seenIgTiers.add(norm.tier);
+            const vBytes = await probeExactContentLength(vUrl);
+            const sizeLabel = vBytes > 0 ? formatBytesToReadable(vBytes) : norm.tier >= 1080 ? "9.8 MB" : norm.tier >= 720 ? "5.4 MB" : "3.1 MB";
             downloadOptions.push({
               id: `opt-${norm.tier}p`,
               label: norm.label,
               resolution: `${norm.tier}p`,
               format: "MP4",
-              size: norm.tier >= 1080 ? "9.8 MB" : norm.tier >= 720 ? "5.4 MB" : "3.1 MB",
+              size: sizeLabel,
               quality: norm.label,
               url: `/api/download?url=${encodeURIComponent(cleanUrl)}&directUrl=${encodeURIComponent(vUrl)}&format=mp4&height=${norm.tier}`,
               type: "video",
@@ -2839,18 +2929,21 @@ async function startServer() {
               noWatermark: true,
               width: vw,
               height: vh,
+              filesize: vBytes > 0 ? vBytes : undefined,
             });
           }
         }
 
         if (!seenIgTiers.has(igTier.tier)) {
           seenIgTiers.add(igTier.tier);
+          const mainBytes = await probeExactContentLength(videoUrlMatch);
+          const mainSizeLabel = mainBytes > 0 ? formatBytesToReadable(mainBytes) : igTier.tier >= 1080 ? "9.8 MB" : "5.4 MB";
           downloadOptions.unshift({
             id: `opt-${igTier.tier}p`,
             label: igTier.label,
             resolution: `${igTier.tier}p`,
             format: "MP4",
-            size: igTier.tier >= 1080 ? "9.8 MB" : "5.4 MB",
+            size: mainSizeLabel,
             quality: igTier.label,
             url: `/api/download?url=${encodeURIComponent(cleanUrl)}&directUrl=${encodeURIComponent(videoUrlMatch)}&format=mp4&height=${igTier.tier}`,
             type: "video",
@@ -2858,6 +2951,7 @@ async function startServer() {
             noWatermark: true,
             width: igWidth,
             height: igHeight,
+            filesize: mainBytes > 0 ? mainBytes : undefined,
           });
         }
 
@@ -5033,7 +5127,7 @@ async function startServer() {
             const hasAudio = Boolean(acodecStr && acodecStr !== "none");
 
             if (hasAudio && (!fmt.vcodec || vcodecStr === "none")) {
-              const aBytes = Number(fmt.filesize) || Number(fmt.filesize_approx) || (fmt.tbr && data.duration ? Math.round((Number(fmt.tbr) * 1000 / 8) * Number(data.duration)) : 0);
+              const aBytes = Number(fmt.filesize) || Number(fmt.filesize_approx) || ((fmt.abr || fmt.tbr) && data.duration ? Math.round((Number(fmt.abr || fmt.tbr) * 1000 / 8) * Number(data.duration)) : 0);
               if (aBytes > bestAudioBytes) bestAudioBytes = aBytes;
             }
 
@@ -5043,7 +5137,12 @@ async function startServer() {
               const norm = normalizeResolutionTier(fmtWidth, fmtHeight, fmtHint);
               if (!norm) continue;
 
-              const vBytes = Number(fmt.filesize) || Number(fmt.filesize_approx) || (fmt.tbr && data.duration ? Math.round((Number(fmt.tbr) * 1000 / 8) * Number(data.duration)) : 0);
+              let vBytes = Number(fmt.filesize) || Number(fmt.filesize_approx) || 0;
+              if (vBytes === 0 && (fmt.vbr || fmt.tbr) && data.duration) {
+                const br = Number(fmt.vbr || fmt.tbr);
+                vBytes = Math.round((br * 1000 / 8) * Number(data.duration));
+              }
+
               const existing = tierMap.get(norm.tier);
               const isHlsManifest = String(fmt.protocol || "").includes("m3u8") || /\.m3u8(\?|$)/i.test(String(fmt.url || ""));
               const isSocialProgressivePlatform = ["tiktok", "facebook", "instagram", "twitter", "pinterest", "threads", "vimeo", "dailymotion", "snapchat"].includes(platform);
@@ -5093,13 +5192,6 @@ async function startServer() {
 
           // Sort detected video resolutions from highest to lowest (e.g. 2160p -> 1440p -> 1080p -> 720p -> 480p -> 360p -> 240p -> 144p)
           const sortedTiers = Array.from(tierMap.values()).sort((a, b) => b.tier - a.tier);
-          const fallbackTopDirectUrl =
-            sortedTiers.find((t) => t.directUrl)?.directUrl ||
-            (typeof data.url === "string" &&
-            data.url.startsWith("http") &&
-            !/\.m3u8(\?|$)/i.test(data.url)
-              ? data.url
-              : undefined);
 
           const downloadOptions: ExtractedMediaData["downloadOptions"] = [];
 
@@ -5109,9 +5201,9 @@ async function startServer() {
                 ? item.sizeBytes + (item.hasAudio ? 0 : bestAudioBytes)
                 : 0;
               const sizeFormatted = totalBytes > 0
-                ? (totalBytes / (1024 * 1024)).toFixed(1) + " MB"
-                : data.duration
-                ? Math.max(1.2, Math.round(data.duration * (item.tier / 720) * 0.16 * 10) / 10) + " MB"
+                ? formatBytesToReadable(totalBytes)
+                : item.tbr && data.duration
+                ? formatBytesToReadable(Math.round((item.tbr * 1000 / 8) * data.duration) + (item.hasAudio ? 0 : bestAudioBytes))
                 : `${item.tier}p MP4`;
 
               const fmtIdParam = item.formatId ? `&formatId=${encodeURIComponent(item.formatId)}` : "";
@@ -5137,7 +5229,7 @@ async function startServer() {
                 vcodec: item.vcodec,
                 acodec: item.acodec,
                 ext: item.ext,
-                filesize: item.filesize,
+                filesize: totalBytes > 0 ? totalBytes : item.filesize,
                 filesizeApprox: item.filesizeApprox,
                 tbr: item.tbr,
               });
@@ -5149,12 +5241,9 @@ async function startServer() {
               label: `HD (${data.height || 720}p)`,
               badge: `HD (${data.height || 720}p)`,
             };
-            const singleSize = data.filesize
-              ? (data.filesize / (1024 * 1024)).toFixed(1) + " MB"
-              : data.filesize_approx
-              ? (data.filesize_approx / (1024 * 1024)).toFixed(1) + " MB"
-              : data.duration
-              ? Math.max(2, Math.round(data.duration * 0.18 * 10) / 10) + " MB"
+            const singleBytes = Number(data.filesize) || Number(data.filesize_approx) || (data.tbr && data.duration ? Math.round((data.tbr * 1000 / 8) * data.duration) : 0);
+            const singleSize = singleBytes > 0
+              ? formatBytesToReadable(singleBytes)
               : "Standard MP4";
 
             downloadOptions.push({
@@ -5174,7 +5263,7 @@ async function startServer() {
               vcodec: data.vcodec ? String(data.vcodec) : undefined,
               acodec: data.acodec ? String(data.acodec) : undefined,
               ext: data.ext ? String(data.ext) : undefined,
-              filesize: Number(data.filesize) || undefined,
+              filesize: singleBytes > 0 ? singleBytes : undefined,
               filesizeApprox: Number(data.filesize_approx) || undefined,
               tbr: Number(data.tbr) || undefined,
             });
@@ -5609,18 +5698,20 @@ async function startServer() {
       const isYouTubeUrl = detectPlatform(cleanUrl) === "youtube";
 
       // Step 2: Check for direct CDN URL from query param, matched option, or non-adaptive metadata
+      // If a specific formatId is requested (e.g. YouTube DASH format 137, 136, 135), must proceed to yt-dlp muxing!
+      // If a specific heightParam (e.g. 480p, 360p, 720p) is requested, only stream direct if matchedOptionDirectUrl is verified for this resolution!
       const candidateDirectUrl = normalizeIncomingDirectUrl(
-        directUrlParam ||
-          (isAudio
-            ? metadata?.directAudioUrl || metadata?.directVideoUrl || matchedOptionDirectUrl
-            : isImage
-            ? metadata?.thumbnail
-            : matchedOptionDirectUrl ||
-              (!effectiveFormatId && !isYouTubeUrl
-                ? metadata?.directVideoUrl
-                : !heightParam && !effectiveFormatId
-                ? metadata?.directVideoUrl
-                : undefined))
+        isAudio
+          ? metadata?.directAudioUrl || metadata?.directVideoUrl || matchedOptionDirectUrl || directUrlParam
+          : isImage
+          ? metadata?.thumbnail || directUrlParam
+          : effectiveFormatId
+          ? undefined // Must use yt-dlp for exact formatId
+          : matchedOptionDirectUrl
+          ? matchedOptionDirectUrl
+          : heightParam > 0
+          ? (directUrlParam && matchedMetadataOption ? directUrlParam : undefined)
+          : directUrlParam || metadata?.directVideoUrl
       );
 
       const isDirectMp4ForAudio = Boolean(isAudio && candidateDirectUrl && /\.mp4(\?|$)/i.test(candidateDirectUrl));
@@ -5877,7 +5968,9 @@ async function startServer() {
 
         if (hasFfmpeg) {
           // Full FFmpeg muxing: merge separate adaptive video + best audio into MP4
-          const heightFallbackSelector = `bestvideo[height<=${targetStreamHeight}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${targetStreamHeight}]+bestaudio/best[height<=${targetStreamHeight}]/best`;
+          // 1. Prioritize EXACT height match [height=X] first, then fallback to [height<=X]
+          const exactHeightSelector = `bestvideo[height=${targetStreamHeight}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height=${targetStreamHeight}]+bestaudio/best[height=${targetStreamHeight}]`;
+          const heightFallbackSelector = `${exactHeightSelector}/bestvideo[height<=${targetStreamHeight}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${targetStreamHeight}]+bestaudio/best[height<=${targetStreamHeight}]/best`;
           const selector = effectiveFormatId
             ? `${effectiveFormatId}+bestaudio[ext=m4a]/${effectiveFormatId}+bestaudio/${effectiveFormatId}/${heightFallbackSelector}`
             : heightFallbackSelector;
@@ -5890,7 +5983,7 @@ async function startServer() {
           );
         } else {
           // Graceful fallback when FFmpeg is absent: select best pre-merged progressive MP4 stream with audio included
-          const progressiveSelector = `best[height<=${targetStreamHeight}][ext=mp4]/best[height<=${targetStreamHeight}]/best[ext=mp4]/best`;
+          const progressiveSelector = `best[height=${targetStreamHeight}][ext=mp4]/best[height=${targetStreamHeight}]/best[height<=${targetStreamHeight}][ext=mp4]/best[height<=${targetStreamHeight}]/best[ext=mp4]/best`;
           args.push(
             "-f", progressiveSelector,
             "-o", `${tempFileBase}.%(ext)s`,
@@ -6171,7 +6264,7 @@ async function startServer() {
         }
 
         const filePath = path.join(dir, matched);
-        const stat = fs.statSync(filePath);
+        let stat = fs.statSync(filePath);
 
         // Validate downloaded file is a genuine binary media file and NOT an HTML webpage or tiny error stub
         let isHtmlStub = /\.(html?|mhtml|xml|txt|json)$/i.test(matched) || stat.size < 1024;
@@ -6201,14 +6294,9 @@ async function startServer() {
           return;
         }
 
-        updateTaskProgress({
-          stage: "streaming",
-          progress: 84,
-          downloadedBytes: Math.round(stat.size * 0.84),
-          totalBytes: stat.size,
-        });
+        const requestedTargetHeight = (matchedMetadataOption?.height && matchedMetadataOption.height > 0 ? matchedMetadataOption.height : heightParam) || 0;
 
-        // Verify actual output video stream dimensions via ffprobe when downloading video
+        // Verify actual output video stream dimensions via ffprobe when downloading video and ensure exact requested height
         if (!isAudio && !isImage) {
           try {
             const probeCmd = ffmpegInfo.ffprobePath || "ffprobe";
@@ -6227,6 +6315,40 @@ async function startServer() {
               const probeData = JSON.parse(probe.stdout);
               const vStream = probeData?.streams?.[0];
               if (vStream?.width && vStream?.height) {
+                const currentMinSide = Math.min(Number(vStream.width), Number(vStream.height));
+                // If user specifically requested e.g. 480p, 360p, or 720p, and the video stream was 1080p, scale it down cleanly
+                if (
+                  requestedTargetHeight > 0 &&
+                  requestedTargetHeight < 1080 &&
+                  currentMinSide > requestedTargetHeight * 1.15 &&
+                  ffmpegInfo.available &&
+                  ffmpegInfo.ffmpegPath
+                ) {
+                  const scaledPath = `${filePath}.scaled.mp4`;
+                  const scaleResult = spawnSync(
+                    ffmpegInfo.ffmpegPath,
+                    [
+                      "-y",
+                      "-i", filePath,
+                      "-vf", `scale=-2:${requestedTargetHeight}`,
+                      "-c:v", "libx264",
+                      "-preset", "veryfast",
+                      "-crf", "23",
+                      "-c:a", "copy",
+                      scaledPath,
+                    ],
+                    { timeout: 35000 }
+                  );
+                  if (scaleResult.status === 0 && fs.existsSync(scaledPath) && fs.statSync(scaledPath).size > 1024) {
+                    try {
+                      fs.unlinkSync(filePath);
+                      fs.renameSync(scaledPath, filePath);
+                      stat = fs.statSync(filePath);
+                      vStream.height = requestedTargetHeight;
+                    } catch {}
+                  }
+                }
+
                 res.setHeader("X-Video-Width", String(vStream.width));
                 res.setHeader("X-Video-Height", String(vStream.height));
                 res.setHeader("X-Video-Resolution", `${vStream.width}x${vStream.height}`);
@@ -6234,6 +6356,13 @@ async function startServer() {
             }
           } catch {}
         }
+
+        updateTaskProgress({
+          stage: "streaming",
+          progress: 84,
+          downloadedBytes: Math.round(stat.size * 0.84),
+          totalBytes: stat.size,
+        });
 
         res.setHeader("Content-Type", isAudio ? "audio/mpeg" : "video/mp4");
         res.setHeader("Content-Disposition", makeContentDisposition(filename));

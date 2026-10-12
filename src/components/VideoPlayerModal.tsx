@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { MediaResult, Language } from '../types';
 import { translations } from '../data/translations';
+import { DoubleTapSeekOverlay } from './DoubleTapSeekOverlay';
 
 interface VideoPlayerModalProps {
   media: MediaResult | null;
@@ -117,6 +118,14 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     }
   };
 
+  const handleSkipSeconds = (deltaSeconds: number) => {
+    if (!videoRef.current) return;
+    const dur = videoRef.current.duration || 100;
+    const newTime = Math.max(0, Math.min(dur, videoRef.current.currentTime + deltaSeconds));
+    videoRef.current.currentTime = newTime;
+    setCurrentTime(newTime);
+  };
+
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(e.target.value);
     if (videoRef.current) {
@@ -213,19 +222,25 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         {/* Video Canvas */}
         <div className="relative bg-black flex items-center justify-center min-h-[240px] sm:min-h-[360px] md:min-h-[440px]">
           {!hasError ? (
-            <video
-              ref={videoRef}
-              key={`player_video_${activeSourceIndex}_${fallbackVideos[activeSourceIndex] || ''}`}
-              src={fallbackVideos[activeSourceIndex]}
-              poster={media.thumbnail}
-              onTimeUpdate={handleTimeUpdate}
-              onEnded={() => setIsPlaying(false)}
-              onError={handleVideoError}
-              onClick={togglePlay}
-              className="max-h-[65vh] w-auto max-w-full object-contain cursor-pointer"
-              playsInline
-              preload="metadata"
-            />
+            <DoubleTapSeekOverlay
+              onSeek={handleSkipSeconds}
+              onTogglePlay={togglePlay}
+              lang={lang}
+              className="flex items-center justify-center w-full h-full"
+            >
+              <video
+                ref={videoRef}
+                key={`player_video_${activeSourceIndex}_${fallbackVideos[activeSourceIndex] || ''}`}
+                src={fallbackVideos[activeSourceIndex]}
+                poster={media.thumbnail}
+                onTimeUpdate={handleTimeUpdate}
+                onEnded={() => setIsPlaying(false)}
+                onError={handleVideoError}
+                className="max-h-[65vh] w-auto max-w-full object-contain pointer-events-none"
+                playsInline
+                preload="metadata"
+              />
+            </DoubleTapSeekOverlay>
           ) : (
             <div className="flex flex-col items-center justify-center p-8 text-center text-slate-400">
               <img 
